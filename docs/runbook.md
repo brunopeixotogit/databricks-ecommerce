@@ -25,6 +25,8 @@ The pipeline is one Workflow with a linear DAG:
 
 The DAG is end-to-end idempotent: running it twice over an unchanged input produces a Gold byte-equivalent (modulo Delta history).
 
+The full DAG was validated end-to-end against the dev workspace (run `136243658787310`, ~4m 35s wall-clock from `RUNNING` → `TERMINATED SUCCESS`); the same path now executes automatically on every push to `main` via [`.github/workflows/cd.yml`](../.github/workflows/cd.yml).
+
 ---
 
 ## 2 · First-time setup on Databricks Free Edition
