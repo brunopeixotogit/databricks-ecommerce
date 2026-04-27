@@ -96,6 +96,7 @@ pytest --cov=src --cov-report=xml --cov-report=term
 - `--cov=src` measures branch coverage on the source tree (not tests themselves).
 - `coverage.xml` uploaded as an artifact from the 3.11 cell only (avoids duplicate uploads).
 - `fail_under = 60` in `pyproject.toml` — drift below 60 % fails CI.
+- `[tool.coverage.run].omit` excludes PySpark-bound modules (`src/bronze/*`, `src/silver/*`, `src/gold/*`, `src/common/io.py`, `src/common/schemas.py`). They cannot be imported in this lane (no PySpark installed) and would otherwise pull the total to 0 % for those files. They will be covered separately by the planned `spark-tests` lane.
 
 ### 3.5 Why three Python versions
 

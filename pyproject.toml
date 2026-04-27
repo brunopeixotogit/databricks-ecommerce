@@ -74,7 +74,19 @@ markers = [
 [tool.coverage.run]
 branch = true
 source = ["src"]
-omit = ["**/__init__.py"]
+# The default CI lane installs only the [dev] extras (no PySpark), so any
+# module that imports pyspark.* cannot be exercised here. Excluding them
+# keeps the coverage gate honest — it measures what the lane actually
+# runs, not the whole codebase. PySpark-bound modules will be covered by
+# a future [spark]-extras CI lane (see docs/ci_cd.md).
+omit = [
+    "**/__init__.py",
+    "src/bronze/*",
+    "src/silver/*",
+    "src/gold/*",
+    "src/common/io.py",
+    "src/common/schemas.py",
+]
 
 [tool.coverage.report]
 show_missing = true
