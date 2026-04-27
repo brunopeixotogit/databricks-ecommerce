@@ -176,65 +176,100 @@ These aren't enforced in the repo (a CLI tool can't set branch protection); docu
 
 ---
 
-## 8 · Deployment strategy (planned — not yet implemented)
+## 8 · Deployment strategy
 
-The CI side is implemented. The CD side is a roadmap for when this graduates from Free Edition to a paid Databricks workspace.
+CI **and** dev CD are implemented. Production CD is the only remaining roadmap item.
 
-### 8.1 Databricks Asset Bundles (DAB)
+### 8.1 Databricks Asset Bundle (`databricks.yml`)
 
-Add `databricks.yml` at the repo root declaring:
+The bundle at the repo root declares the whole medallion DAG and two targets:
 
-```yaml
+```
 bundle:
   name: ecom_lakehouse
 
-resources:
-  jobs:
-    medallion:
-      name: ecom-medallion
-      tasks:
-        - task_key: setup
-          notebook_task: { notebook_path: notebooks/00_setup.py }
-        - task_key: create_tables
-          depends_on: [{ task_key: setup }]
-          notebook_task: { notebook_path: notebooks/01_create_tables.py }
-        # ... 10_run_simulator → 20_bronze → 30_silver → 40_gold → 99_quality_checks
-      schedule:
-        quartz_cron_expression: "0 0 * * * ?"
-        timezone_id: UTC
+resources.jobs.medallion.tasks:
+  setup → create_tables → simulate → bronze → silver → gold → quality
 
 targets:
-  dev:
-    workspace: { host: https://<dev-host>.cloud.databricks.com }
-    variables: { catalog: dev_main }
-  prod:
-    workspace: { host: https://<prod-host>.cloud.databricks.com }
-    variables: { catalog: main }
+  dev:   { mode: development, variables: { catalog: dev_main } }
+  prod:  { mode: production,  variables: { catalog: main } }
 ```
 
-### 8.2 GitHub Actions deploy job (planned)
+Schedule is **PAUSED** in the bundle definition; flip to `UNPAUSED` and redeploy when you want hourly auto-runs in the workspace.
+
+### 8.2 GitHub Actions deploy job (implemented — `.github/workflows/cd.yml`)
 
 ```yaml
-deploy:
-  needs: [lint-and-test, config-validation]
-  if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-  runs-on: ubuntu-latest
-  steps:
-    - uses: actions/checkout@v4
-    - uses: databricks/setup-cli@main
-    - run: databricks bundle deploy --target prod
-      env:
-        DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-        DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+name: CD — deploy to dev
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: cd-dev
+  cancel-in-progress: false   # never cancel an in-flight deploy
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-dev:
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      DATABRICKS_HOST:  ${{ secrets.DATABRICKS_HOST_DEV }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_DEV }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: databricks/setup-cli@main
+      - run: databricks bundle validate --target dev
+      - run: databricks bundle deploy   --target dev
+      - run: databricks bundle run      --target dev medallion
 ```
 
-### 8.3 Promotion strategy
+#### What each step does
 
-`dev` → `prod` is a target switch in `databricks bundle deploy`. The same artifacts — same notebooks, same `src/` modules — are deployed to both. Per-environment config differs only via the `targets:` block (catalog name, cluster size).
+| Step | Behaviour | Failure mode |
+|---|---|---|
+| `databricks/setup-cli@main` | Installs the Databricks CLI on the runner | runner-side install failure |
+| `bundle validate --target dev` | Offline syntax + reference check | typo in `databricks.yml`; bad variable interpolation |
+| `bundle deploy --target dev` | Idempotent. Uploads notebooks, updates the Job definition, leaves schedule PAUSED | workspace permission denied; bad token; auth host mismatch |
+| `bundle run --target dev medallion` | Synchronous run; bubbles task failures up to GitHub Actions | task-level errors surface as workflow failures |
+| `bundle summary --target dev` | (`if: always()`) prints the deployed resources for log forensics | — |
 
-#### Why DAB over notebook-by-notebook deploy
+#### Why these choices
 
-DAB declares **the whole job topology** in code, version-controlled, reviewable. It deploys notebooks, jobs, schedules, and even cluster definitions in one transaction. Manual notebook copy/paste between workspaces drifts; DAB does not.
+- **`environment: dev`** — secrets are scoped to a GitHub Environment, audited, and (optionally) gated behind reviewers. Removes the temptation to use repo-wide secrets that bleed across environments.
+- **`concurrency.cancel-in-progress: false`** — cancelling a deploy mid-flight can leave the workspace half-deployed. Worth waiting.
+- **No PR trigger** — PRs run CI (`ci.yml`) only. Deploys happen after merge, when `main` is canonical. PR contributors never have credentials to a real workspace.
+- **No matrix** — one runner, one target. The CI matrix exists to catch Python-version drift; deploys are environment-specific.
+
+### 8.3 Required GitHub Secrets
+
+Configured in **Repo → Settings → Environments → `dev`**:
+
+| Secret | What it is |
+|---|---|
+| `DATABRICKS_HOST_DEV`  | dev workspace URL (e.g. `https://dbc-xxx.cloud.databricks.com`) |
+| `DATABRICKS_TOKEN_DEV` | OAuth M2M token for a service principal scoped to dev |
+
+Use OAuth M2M tokens (not personal access tokens) — they're scoped, rotatable, and not tied to a person who might leave.
+
+### 8.4 Promotion strategy
+
+| Stage | Trigger | Workflow |
+|---|---|---|
+| Dev | every push to `main` | `cd.yml` (this file) |
+| Prod | tagged release (`v*.*.*`) | **planned** — separate `cd-prod.yml`, gated on a protected `prod` Environment with required reviewer + wait timer |
+
+`dev` → `prod` is a target switch in `databricks bundle deploy`. The same artefacts — same notebooks, same `src/` modules — are deployed to both. Per-environment config differs only via the `targets:` block (catalog name, cluster size, optional service principal).
+
+### 8.5 Why DAB over notebook-by-notebook deploy
+
+DAB declares **the whole job topology** in code, version-controlled, reviewable. It deploys notebooks, jobs, schedules, and (when declared) cluster definitions in one transaction. Manual notebook copy/paste between workspaces drifts; DAB does not.
 
 ---
 
@@ -266,4 +301,4 @@ A single Workflow runs the medallion DAG:
 | `gitleaks` as advisory | Block merge on findings | False positives would block harmless PRs; treat findings as a triage signal |
 | Three Python versions | One pinned version | Floor / ceiling matter; surface version-specific bugs early |
 | Coverage floor at 60 % | Strict 100 % | Anti-pattern: gameable; we'd rather grow real coverage than write tests for `__init__.py` |
-| Asset Bundles deferred | Implement now | Free Edition doesn't support per-target deploy fully; documented as roadmap when promoted to a paid tier |
+| Prod CD deferred behind tag-gated workflow | Auto-deploy prod on every merge | Tagging is intentional friction; prod deploys never happen on every PR-merge |

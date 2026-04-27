@@ -159,6 +159,30 @@ The simulator and quality helpers are pure Python — most logic can be tested w
 
 ---
 
+## CI/CD
+
+Two GitHub Actions workflows protect and promote `main`:
+
+| Workflow | File | Trigger | What it does |
+|---|---|---|---|
+| **CI**  | [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) | push / PR to `main`, manual | matrix lint + tests (Py 3.10/3.11/3.12), import-graph smoke, `conf/*.yml` validation, Gitleaks scan |
+| **CD — dev** | [`.github/workflows/cd.yml`](./.github/workflows/cd.yml) | push to `main`, manual | installs Databricks CLI, `bundle validate` → `bundle deploy --target dev` → `bundle run medallion` against the dev workspace |
+
+**Promotion flow:** PR opened → CI runs → green merge to `main` → CD runs `validate / deploy / run` against dev. Production deploys are deliberately **not** automated; promotion to prod is tag-gated and lives in a future workflow (see [`docs/ci_cd.md`](./docs/ci_cd.md)).
+
+### Required GitHub Secrets
+
+Configured in **Repo → Settings → Environments → `dev`** (scoped, audited):
+
+| Secret | What it is |
+|---|---|
+| `DATABRICKS_HOST_DEV`  | dev workspace URL (e.g. `https://dbc-xxx.cloud.databricks.com`) |
+| `DATABRICKS_TOKEN_DEV` | OAuth M2M token for a service principal scoped to dev |
+
+The deploy uses the bundle's `dev` target (`catalog: dev_main`); the `prod` target is never touched by automation.
+
+---
+
 ## What gets produced
 
 Final tables under `main.ecom_gold`:

@@ -1,0 +1,68 @@
+name: CD — deploy to dev
+
+# Continuously delivers main into the dev Databricks workspace.
+#
+# Flow per push to main:
+#   1. Install Databricks CLI
+#   2. Validate the Asset Bundle against the dev target (offline)
+#   3. Deploy the bundle to the dev workspace
+#   4. Trigger the medallion Workflow run
+#
+# Production deploys live in a separate, tag-gated workflow (not yet wired —
+# see docs/ci_cd.md). This file deliberately deploys only to dev.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # Serialise dev deploys. Never cancel an in-flight deploy — that can leave
+  # the workspace in a half-deployed state.
+  group: cd-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-dev:
+    name: Validate · deploy · run (dev)
+    runs-on: ubuntu-latest
+
+    # Use a GitHub Environment so DATABRICKS_* secrets are scoped to dev only
+    # and we get an audit trail per deployment.
+    environment: dev
+
+    env:
+      DATABRICKS_HOST:  ${{ secrets.DATABRICKS_HOST_DEV }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN_DEV }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Show CLI + auth context
+        run: |
+          databricks --version
+          databricks current-user me --output json | jq '.userName, .id' || true
+
+      - name: Validate bundle (dev target)
+        # Offline check — fails fast on YAML / reference errors.
+        run: databricks bundle validate --target dev
+
+      - name: Deploy bundle (dev target)
+        # Idempotent. Re-uploads notebooks, updates the medallion Job
+        # definition, leaves the schedule PAUSED per databricks.yml.
+        run: databricks bundle deploy --target dev
+
+      - name: Run medallion job
+        # Synchronous run; surfaces task-level failures back to GitHub Actions.
+        run: databricks bundle run --target dev medallion
+
+      - name: Print deployed resources
+        if: always()
+        run: databricks bundle summary --target dev
