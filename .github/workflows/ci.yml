@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    name: Lint + unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements.txt
+
+      - name: Install project (editable) with dev extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Verify src/ import structure
+        run: |
+          python -c "
+          import importlib, sys
+          modules = [
+              'src.common.schemas',
+              'src.common.config',
+              'src.common.io',
+              'src.common.quality',
+              'src.simulator.entities',
+              'src.simulator.behavior',
+              'src.simulator.emit',
+              'src.bronze.ingest_events',
+              'src.silver.events',
+              'src.silver.dim_users',
+              'src.silver.dim_products',
+              'src.silver.fact_orders',
+              'src.gold.daily_sales',
+              'src.gold.funnel',
+              'src.gold.abandoned_carts',
+              'src.gold.user_360',
+          ]
+          failed = []
+          for m in modules:
+              try:
+                  importlib.import_module(m)
+                  print(f'ok  {m}')
+              except Exception as e:
+                  failed.append((m, repr(e)))
+                  print(f'ERR {m}: {e}')
+          if failed:
+              sys.exit(f'{len(failed)} module(s) failed to import')
+          "
+
+      - name: Lint with Ruff
+        run: ruff check src tests
+
+      - name: Run pytest with coverage
+        run: pytest --cov=src --cov-report=xml --cov-report=term
+
+      - name: Upload coverage artifact
+        if: matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  config-validation:
+    name: Validate conf/*.yml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project
+        run: pip install -e ".[dev]"
+      - name: Load every YAML in conf/
+        run: |
+          python -c "
+          from src.common.config import load_config
+          for name in ('pipeline', 'simulator'):
+              cfg = load_config(name)
+              assert isinstance(cfg, dict) and cfg, f'{name}.yml is empty or invalid'
+              print(f'{name}.yml ok ({len(cfg)} top-level keys)')
+          "
+
+  secrets-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true

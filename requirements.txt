@@ -1,6 +1,16 @@
-# Local development dependencies. The Databricks runtime already
-# provides pyspark and delta-spark, so we don't pin them here.
+# Local development dependencies.
+# The Databricks runtime already provides pyspark and delta-spark, so
+# we do NOT pin them here. For local Spark tests, use:
+#     pip install -e ".[spark]"
+# For dev tooling (pytest, ruff, coverage), use:
+#     pip install -e ".[dev]"
+#
+# This file mirrors the runtime + dev deps in pyproject.toml and exists
+# only as a convenience for `pip install -r requirements.txt`.
+
 faker>=24.0
 pyyaml>=6.0
 pytest>=8.0
+pytest-cov>=5.0
 chispa>=0.10
+ruff>=0.5
