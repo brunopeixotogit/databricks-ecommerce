@@ -14,6 +14,19 @@ name: CD — deploy to dev
 on:
   push:
     branches: [main]
+    # Path filter: skip the Databricks deploy when only documentation /
+    # repo metadata changed. Saves Databricks compute and avoids redundant
+    # workspace job runs when no pipeline code actually moved.
+    #
+    # CD runs only when one of these paths is touched:
+    paths:
+      - 'src/**'
+      - 'notebooks/**'
+      - 'databricks.yml'
+      - 'conf/**'
+      - '.github/workflows/**'
+  # workflow_dispatch has no `paths` filter by design — manual runs should
+  # always work (e.g. force a redeploy after fixing the dev secrets).
   workflow_dispatch:
 
 concurrency:
