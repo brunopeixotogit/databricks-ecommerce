@@ -159,16 +159,56 @@ The simulator and quality helpers are pure Python — most logic can be tested w
 
 ---
 
-## CI/CD
+## CI/CD pipeline (current state)
 
-Two GitHub Actions workflows protect and promote `main`:
+Two GitHub Actions workflows protect and promote `main`. Both are **active and run automatically**.
 
-| Workflow | File | Trigger | What it does |
-|---|---|---|---|
-| **CI**  | [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) | push / PR to `main`, manual | matrix lint + tests (Py 3.10/3.11/3.12), import-graph smoke, `conf/*.yml` validation, Gitleaks scan |
-| **CD — dev** | [`.github/workflows/cd.yml`](./.github/workflows/cd.yml) | push to `main`, manual | installs Databricks CLI, `bundle validate` → `bundle deploy --target dev` → `bundle run medallion` against the dev workspace |
+### CI runs on every PR and push to `main`
 
-**Promotion flow:** PR opened → CI runs → green merge to `main` → CD runs `validate / deploy / run` against dev. Production deploys are deliberately **not** automated; promotion to prod is tag-gated and lives in a future workflow (see [`docs/ci_cd.md`](./docs/ci_cd.md)).
+`.github/workflows/ci.yml`:
+
+- **Ruff linting** on `src/` and `tests/`
+- **Unit tests** with `pytest --cov=src` on a matrix of **Python 3.10 / 3.11 / 3.12**
+- **Import-graph smoke** — every pure-Python module under `src/` must import without PySpark
+- **Config validation** — every `conf/*.yml` is loaded through `src.common.config.load_config`
+- **Secret scanning** — Gitleaks across the full git history (advisory)
+
+### CD runs on every push to `main`
+
+`.github/workflows/cd.yml`:
+
+- Installs the Databricks CLI (`databricks/setup-cli@main`)
+- `databricks bundle validate --target dev`
+- `databricks bundle deploy --target dev` (uploads notebooks, updates Job definition)
+- `databricks bundle run --target dev medallion` (executes the full Bronze → Silver → Gold DAG)
+
+### End-to-end flow
+
+```
+git push origin main
+        │
+        ▼
+┌──────────────── CI (ci.yml) ────────────────┐
+│  ruff · pytest matrix · import smoke ·       │
+│  conf validation · gitleaks                  │
+└──────────────────────┬───────────────────────┘
+                       │ green
+                       ▼
+┌──────────────── CD (cd.yml) ────────────────┐
+│  bundle validate → deploy → run medallion    │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+┌────────── Databricks workspace ─────────────┐
+│  setup → create_tables → simulate →          │
+│  bronze → silver → gold → quality            │
+└──────────────────────┬───────────────────────┘
+                       │
+                       ▼
+            Gold tables refreshed
+        (fact_daily_sales, fact_funnel,
+         fact_abandoned_carts, dim_user_360)
+```
 
 ### Required GitHub Secrets
 
@@ -180,6 +220,116 @@ Configured in **Repo → Settings → Environments → `dev`** (scoped, audited)
 | `DATABRICKS_TOKEN_DEV` | OAuth M2M token for a service principal scoped to dev |
 
 The deploy uses the bundle's `dev` target (`catalog: dev_main`); the `prod` target is never touched by automation.
+
+> Production deploys are intentionally **tag-gated and not yet wired** — see [`docs/ci_cd.md § 8.4`](./docs/ci_cd.md). Dev CD is the canonical promotion path today.
+
+---
+
+## Testing strategy
+
+Three layers of tests, each catching a different class of failure.
+
+### 1 · CI tests (code level)
+
+Run by `.github/workflows/ci.yml` on every PR and push.
+
+| Check | Tool | Catches |
+|---|---|---|
+| Linting          | Ruff (`E`, `F`, `I`, `B`, `UP`, `SIM`) | Style drift, dead imports, deprecated typing forms |
+| Unit tests       | pytest 8 + coverage (≥ 60 %)           | Behavioural regressions in pure-Python logic |
+| Multi-version    | matrix `3.10 / 3.11 / 3.12`            | Version-specific bugs (PEP 604 unions, dataclass kw-only, typing.Self) |
+| Import-graph     | inline Python script                   | An accidental `from pyspark.sql import …` in a pure-Python module |
+| Config schema    | `load_config("pipeline" / "simulator")` | Malformed YAML; missing keys |
+| Secrets          | Gitleaks                               | Accidentally-committed tokens / `.env` / `*.pem` |
+
+**Concrete failure scenario.** A contributor edits `src/silver/events.py` and breaks the dedup window — say `Window.partitionBy("event_id").orderBy(F.col("_ingest_ts").desc())` becomes `.orderBy("_ingest_ts")` (ascending). Their PR runs through CI:
+
+1. Ruff passes (style is fine).
+2. The pure-Python tests pass (Silver isn't directly tested with a real DataFrame in this lane).
+3. **Import-graph smoke** still passes — but if they accidentally added `from pyspark.sql import …` to a pure-Python module to debug, **all three matrix cells fail**.
+4. After merge, **CD runs Silver against the dev workspace**, and `99_quality_checks` raises — see § 2 below.
+
+### 2 · Data quality tests (pipeline level)
+
+Run inside Databricks by `notebooks/99_quality_checks.py`. Every expectation is a SQL predicate that must evaluate `TRUE` for a valid row. `severity="fail"` violations raise `AssertionError` and abort the Workflow run.
+
+| Validation target | Predicate | Why it exists |
+|---|---|---|
+| `event_id` integrity | `event_id IS NOT NULL` (fail) | Dedup keys on `event_id`; null = uniqueness cannot be guaranteed |
+| Event-type domain | `event_type IN ('page_view','add_to_cart','purchase','abandon_cart')` (fail) | Producer drift would break every downstream transformation |
+| Sessionisation invariant | `session_id_silver IS NOT NULL` (fail) | Funnel and abandoned-cart marts depend on it |
+| Purchase wholeness | `event_type <> 'purchase' OR order_id IS NOT NULL` (fail) | A purchase without `order_id` is silently lost in `fact_orders` groupby |
+| Price sanity | `price IS NULL OR price >= 0` (warn) | Surfaces upstream bugs without blocking |
+| Order totals | `total >= 0`, `subtotal >= 0`, `size(items) > 0` (fail) | `fact_daily_sales` would be wrong if violated |
+| Total math | `abs(total - (subtotal + tax + shipping)) < 0.05` (warn) | Detects drift between Silver math and any future rule change |
+
+The full framework is documented in [`docs/data_quality.md`](./docs/data_quality.md).
+
+### 3 · SQL validation tests (real queries)
+
+These can be run by hand against the dev workspace after any deploy, or wired into `99_quality_checks` for permanent monitoring.
+
+#### Bronze ↔ Silver consistency
+```sql
+SELECT COUNT(*) AS bronze_rows FROM dev_main.ecom_bronze.events_raw;
+SELECT COUNT(*) AS silver_rows FROM dev_main.ecom_silver.events;
+```
+Silver should be **≤ Bronze** (filter + dedup) but typically within ~5 %. A larger gap signals dedup or filtering misbehaviour.
+
+#### Event-type integrity
+```sql
+SELECT event_type, COUNT(*) AS rows
+FROM   dev_main.ecom_silver.events
+GROUP  BY event_type
+ORDER  BY rows DESC;
+```
+Expect exactly four rows: `page_view`, `add_to_cart`, `purchase`, `abandon_cart`. Anything else means producer drift slipped through Bronze rescue mode.
+
+#### Deduplication (no `event_id` may appear twice in Silver)
+```sql
+SELECT event_id, COUNT(*) AS dup_count
+FROM   dev_main.ecom_silver.events
+GROUP  BY event_id
+HAVING COUNT(*) > 1;
+```
+Should return **zero rows**. A row here means the `MERGE` on `event_id` failed or the dedup window changed.
+
+#### SCD2 correctness (each user has exactly one `is_current = true` row)
+```sql
+SELECT user_id, COUNT(*) AS current_versions
+FROM   dev_main.ecom_silver.dim_users_scd2
+WHERE  is_current = true
+GROUP  BY user_id
+HAVING COUNT(*) > 1;
+```
+Should return **zero rows**. More than one current version means the hash-boundary detection broke or `valid_to` filling regressed.
+
+#### Fact-orders integrity
+```sql
+SELECT COUNT(*)             AS orders,
+       ROUND(SUM(total), 2) AS total_gmv_with_tax_shipping,
+       ROUND(SUM(subtotal + tax + shipping), 2) AS recomputed_total
+FROM   dev_main.ecom_silver.fact_orders;
+```
+`total_gmv_with_tax_shipping` should equal `recomputed_total` to within rounding (< $0.01 per order). Drift means the tax/shipping rule changed without updating the column.
+
+#### Bronze → Gold reconciliation
+```sql
+SELECT (SELECT SUM(item.line_total)
+        FROM dev_main.ecom_silver.fact_orders LATERAL VIEW EXPLODE(items) AS item)  AS silver_gmv,
+       (SELECT SUM(gmv) FROM dev_main.ecom_gold.fact_daily_sales)                    AS gold_gmv;
+```
+Two values should match exactly. Mismatch means Gold is reading stale Silver or vice versa.
+
+### 4 · Why each test layer exists
+
+| Layer | Production failure simulated |
+|---|---|
+| **CI tests** | Refactor breaks behaviour; a typo in a typing import; secrets committed by mistake. Catches the **developer-side** failure modes before any data ever moves. |
+| **Data quality tests** | Producer drift; Kafka at-least-once duplication; late-arriving events; partial replays of Bronze. Catches **runtime** failures invisible to lint or unit tests. |
+| **SQL validation tests** | Silent join misalignment; a Silver job whose `MERGE` keys flipped; SCD2 boundaries that opened spurious versions; Gold reading from stale Silver. These mimic the post-mortem queries you'd run after a "why is yesterday's GMV different from today's?" alert. |
+
+Each layer is independent. CI never reaches the data; quality gates never inspect the code. Both must pass, and the SQL queries are the post-deploy sanity that keeps Gold honest.
 
 ---
 

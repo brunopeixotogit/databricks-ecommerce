@@ -1,8 +1,17 @@
 # CI/CD
 
-How the project is tested, validated, and (in the future) deployed. The CI side is implemented today; the CD side outlines the planned roadmap with Databricks Asset Bundles.
+How the project is tested, validated, and deployed. **CI and dev CD are both live**: every push to `main` runs the test matrix and, on green, deploys the Asset Bundle to the dev workspace and runs the medallion job end-to-end. The only intentional gap is **prod CD** (tag-gated, see § 8.4).
 
-Code: `.github/workflows/ci.yml`, `pyproject.toml`, `tests/`.
+Lifecycle:
+
+```
+PR opened → CI runs (ci.yml) → green → merge to main
+        → CD runs (cd.yml) → bundle validate → deploy → run medallion
+        → Databricks workspace executes 7-task DAG (00_setup … 99_quality_checks)
+        → Gold tables refreshed
+```
+
+Code: `.github/workflows/ci.yml`, `.github/workflows/cd.yml`, `databricks.yml`, `pyproject.toml`, `tests/`.
 
 ---
 

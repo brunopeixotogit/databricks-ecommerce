@@ -29,6 +29,77 @@ The full DAG was validated end-to-end against the dev workspace (run `1362436587
 
 ---
 
+## 1.1 · Canonical execution path — `git push`
+
+The pipeline runs automatically. **Manual execution (§ 2 below) is only for first-time setup and debugging.**
+
+```
+git push origin main
+        │
+        ▼
+  CI (.github/workflows/ci.yml)
+        │   ruff · pytest matrix (Py 3.10/3.11/3.12) · import smoke · conf validation · gitleaks
+        ▼
+  CD (.github/workflows/cd.yml)
+        │   databricks bundle validate --target dev
+        │   databricks bundle deploy   --target dev
+        │   databricks bundle run      --target dev medallion
+        ▼
+  Databricks Workflow runs (7 tasks)
+        │   setup → create_tables → simulate → bronze → silver → gold → quality
+        ▼
+  Gold tables refreshed in dev_main.ecom_gold
+```
+
+A typical merge takes **~6 minutes wall-clock**: ~90 s CI matrix → ~30 s deploy → ~4 min DAG execution.
+
+### Watching a deploy
+
+- **GitHub Actions** — https://github.com/brunopeixotogit/databricks-ecommerce/actions
+- **Databricks job** — https://dbc-98593ae9-08e1.cloud.databricks.com/jobs/795815936497947?o=3252836371316438
+- **Job logs / latest run** — open the job page above and click the most recent run row.
+
+### Debugging a CI failure
+
+| Failing job | First place to look | Common causes |
+|---|---|---|
+| `lint-and-test (3.10/3.11/3.12)` | "Run pytest with coverage" step log | New unit test failure; coverage dropped below `fail_under = 60`; ruff violations introduced |
+| Import-graph smoke | "Verify src/ import structure" step | A pure-Python module added `from pyspark.sql import …` (use `if TYPE_CHECKING:` guard or move to a Spark-bound module) |
+| `config-validation` | "Load every YAML in conf/" step | Malformed YAML; `load_config` schema regression |
+| `secrets-scan` | Gitleaks step output | False positives are advisory (`continue-on-error: true`). Real findings need rotation + history rewrite |
+
+To reproduce CI locally before pushing:
+
+```bash
+pip install -e ".[dev]"
+ruff check src tests
+pytest --cov=src --cov-report=term
+```
+
+### Debugging a CD failure
+
+| Symptom | Cause | Remedy |
+|---|---|---|
+| `Error: required environment variable DATABRICKS_HOST is not set` | `dev` GitHub Environment secrets unconfigured | Settings → Environments → `dev` → add `DATABRICKS_HOST_DEV` and `DATABRICKS_TOKEN_DEV` |
+| `bundle validate` fails with reference error | `databricks.yml` typo or missing `${var.*}` value | Run `databricks bundle validate --target dev` locally |
+| Deploy succeeds, run fails on a specific task | Notebook-level error | Open the Databricks job run page; click the failing task; inspect cell output |
+| `quality` task raises `AssertionError` | Data-quality predicate in `99_quality_checks` violated | Inspect the failing predicate — see [`data_quality.md`](./data_quality.md); fix upstream and re-trigger CD via **Re-run all jobs** in the GitHub Actions UI |
+
+### Re-running the Databricks job manually
+
+CD runs the medallion automatically on every push. To trigger an extra run **without a code change** (e.g. after fixing a transient issue or producer drift):
+
+```bash
+# From your laptop — same auth as CD uses
+databricks bundle run --target dev medallion
+```
+
+Or in the workspace UI: open the job page → **Run now**. Either path uses the bundle's already-deployed Job definition.
+
+To re-trigger CD itself (for example to test a re-deploy without a commit), use **Actions → CD — deploy to dev → Run workflow**.
+
+---
+
 ## 2 · First-time setup on Databricks Free Edition
 
 ### 2.1 Prerequisites
