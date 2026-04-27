@@ -10,7 +10,15 @@
 # MAGIC - `continuous` — keep generating in a loop until the notebook is cancelled.
 
 # COMMAND ----------
-# MAGIC %pip install faker
+# MAGIC %md
+# MAGIC ## Install runtime dependencies
+# MAGIC
+# MAGIC `faker` is not bundled with the Databricks Free Edition runtime, so we
+# MAGIC install it on every run before importing the simulator. The
+# MAGIC `restartPython()` below is required for the new package to be picked up.
+
+# COMMAND ----------
+# MAGIC %pip install --quiet "faker>=24.0"
 
 # COMMAND ----------
 dbutils.library.restartPython()
