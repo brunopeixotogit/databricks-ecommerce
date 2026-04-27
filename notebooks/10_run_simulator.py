@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 10 — Run the simulator
+# MAGIC #  10 — Run the simulator
 # MAGIC
 # MAGIC Generates a user population, a product catalog, and a stream of
 # MAGIC clickstream events into the landing volume. Modes:
