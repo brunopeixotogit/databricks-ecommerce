@@ -1,0 +1,127 @@
+# Databricks Asset Bundle definition.
+#
+# Declares the Workflow that runs the medallion DAG end-to-end. Same
+# artefacts deploy to dev / prod by switching `--target`. Per-environment
+# differences live under `targets:` (catalog name, host).
+#
+# Usage:
+#   databricks bundle validate                    # syntax check
+#   databricks bundle deploy --target dev         # promote to dev workspace
+#   databricks bundle run     --target dev medallion
+#
+# The CI side runs in .github/workflows/ci.yml; the deploy side is
+# wired up once the workspace + token secrets are configured. See
+# docs/ci_cd.md for the planned deploy job.
+
+bundle:
+  name: ecom_lakehouse
+
+variables:
+  catalog:
+    description: Unity Catalog the pipeline writes to.
+    default: main
+  bronze_schema: { default: ecom_bronze }
+  silver_schema: { default: ecom_silver }
+  gold_schema:   { default: ecom_gold }
+  volume:        { default: landing }
+
+resources:
+  jobs:
+    medallion:
+      name: ecom-medallion
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: setup
+          notebook_task:
+            notebook_path: notebooks/00_setup.py
+            base_parameters:
+              catalog:       ${var.catalog}
+              bronze_schema: ${var.bronze_schema}
+              silver_schema: ${var.silver_schema}
+              gold_schema:   ${var.gold_schema}
+              volume_name:   ${var.volume}
+
+        - task_key: create_tables
+          depends_on: [{ task_key: setup }]
+          notebook_task:
+            notebook_path: notebooks/01_create_tables.py
+            base_parameters:
+              catalog:       ${var.catalog}
+              bronze_schema: ${var.bronze_schema}
+
+        - task_key: simulate
+          depends_on: [{ task_key: create_tables }]
+          notebook_task:
+            notebook_path: notebooks/10_run_simulator.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema:  ${var.bronze_schema}
+              volume:  ${var.volume}
+              mode:    burst
+              n_sessions: "5000"
+
+        - task_key: bronze
+          depends_on: [{ task_key: simulate }]
+          notebook_task:
+            notebook_path: notebooks/20_bronze.py
+            base_parameters:
+              catalog:       ${var.catalog}
+              bronze_schema: ${var.bronze_schema}
+              volume:        ${var.volume}
+              trigger:       availableNow
+
+        - task_key: silver
+          depends_on: [{ task_key: bronze }]
+          notebook_task:
+            notebook_path: notebooks/30_silver.py
+            base_parameters:
+              catalog:             ${var.catalog}
+              bronze_schema:       ${var.bronze_schema}
+              silver_schema:       ${var.silver_schema}
+              inactivity_minutes:  "30"
+
+        - task_key: gold
+          depends_on: [{ task_key: silver }]
+          notebook_task:
+            notebook_path: notebooks/40_gold.py
+            base_parameters:
+              catalog:       ${var.catalog}
+              silver_schema: ${var.silver_schema}
+              gold_schema:   ${var.gold_schema}
+
+        - task_key: quality
+          depends_on: [{ task_key: gold }]
+          notebook_task:
+            notebook_path: notebooks/99_quality_checks.py
+            base_parameters:
+              catalog:       ${var.catalog}
+              silver_schema: ${var.silver_schema}
+              gold_schema:   ${var.gold_schema}
+
+      schedule:
+        # Hourly off-peak; uses availableNow trigger so each run is finite.
+        quartz_cron_expression: "0 0 * * * ?"
+        timezone_id: UTC
+        pause_status: PAUSED   # flip to UNPAUSED post-deploy
+
+      email_notifications:
+        on_failure: []   # populate with on-call alias when promoted
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      catalog: dev_main
+    workspace:
+      # host populated via DATABRICKS_HOST env var in CI
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+
+  prod:
+    mode: production
+    variables:
+      catalog: main
+    workspace:
+      root_path: /Shared/.bundle/${bundle.name}/${bundle.target}
+    run_as:
+      service_principal_name: ${workspace.current_user.userName}

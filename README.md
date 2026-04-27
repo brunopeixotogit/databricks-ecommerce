@@ -22,7 +22,18 @@ Data-engineering portfolios tend to stop at "I can read a CSV with Spark." This 
 - **query-tuned Gold marts** with `OPTIMIZE` / `ZORDER BY`, partitioned for predicate pushdown;
 - **operational hygiene** — config + env overrides, quality expectations, unit tests, Workflow-friendly triggers.
 
-The full step-by-step write-up lives in [`documentation.md`](./documentation.md).
+The full technical write-up is split into focused documents under [`docs/`](./docs/README.md):
+
+| Doc | Read this for |
+|---|---|
+| [`docs/architecture.md`](./docs/architecture.md)     | End-to-end design, data flow, principles, tradeoffs |
+| [`docs/bronze_layer.md`](./docs/bronze_layer.md)     | Auto Loader, schema enforcement, append-only contract |
+| [`docs/silver_layer.md`](./docs/silver_layer.md)     | Dedup, sessionisation, SCD2 by attribute hash |
+| [`docs/gold_layer.md`](./docs/gold_layer.md)         | Marts, KPIs, BI readiness |
+| [`docs/data_model.md`](./docs/data_model.md)         | Pinned schemas, ER relationships |
+| [`docs/data_quality.md`](./docs/data_quality.md)     | Expectation framework, severity, failure handling |
+| [`docs/ci_cd.md`](./docs/ci_cd.md)                   | GitHub Actions, Databricks Asset Bundles, deploy plan |
+| [`docs/runbook.md`](./docs/runbook.md)               | Step-by-step run, debugging, reprocessing |
 
 ---
 
@@ -176,7 +187,7 @@ Each is denormalised, partitioned where it makes sense, and Z-ordered on the col
 
 ## Lessons from real failures
 
-The pipeline was hardened against three failures hit during development — all documented with root cause and fix in [`documentation.md`](./documentation.md):
+The pipeline was hardened against three failures hit during development — all documented with root cause and fix in [`docs/runbook.md`](./docs/runbook.md):
 
 - `Catalog 'main' does not exist` — added `CREATE CATALOG IF NOT EXISTS` to `00_setup.py`.
 - `ModuleNotFoundError: No module named 'faker'` — added `%pip install faker` + `dbutils.library.restartPython()` to `10_run_simulator.py`.
@@ -197,7 +208,7 @@ The architectural shape — medallion, event-first, decoupled producer — stays
 | Quality         | `Expectation` helper          | DLT expectations or Great Expectations in CI        |
 | Schema          | `_rescued_data` column        | Confluent / Apicurio Schema Registry                |
 | Performance     | Manual `OPTIMIZE` + Z-ORDER   | Liquid Clustering, Predictive Optimization          |
-| CI/CD           | Manual deploy                 | Databricks Asset Bundles + GitHub Actions           |
+| CI/CD           | GitHub Actions (lint + tests) | + Databricks Asset Bundles ([`databricks.yml`](./databricks.yml)) |
 | PII             | None (synthetic)              | Tokenisation + UC column masks                      |
 | ML              | Notebook training             | Feature Store + MLflow + Model Serving              |
 
@@ -206,4 +217,4 @@ The architectural shape — medallion, event-first, decoupled producer — stays
 ## Author
 
 **Bruno Peixoto** — building production-grade data platforms on Databricks and Delta Lake.
-For the full step-by-step technical breakdown of every layer, see [`documentation.md`](./documentation.md).
+For the full step-by-step technical breakdown of every layer, start at [`docs/README.md`](./docs/README.md).
