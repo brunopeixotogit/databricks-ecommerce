@@ -13,3 +13,4 @@ venv/
 spark-warehouse/
 metastore_db/
 derby.log
+.claude/
