@@ -12,8 +12,6 @@ exits, which is ideal for Free Edition where keeping a stream alive
 """
 from __future__ import annotations
 
-from typing import Optional
-
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType

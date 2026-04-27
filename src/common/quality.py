@@ -10,8 +10,9 @@ plain PySpark pipelines (Free Edition).
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterable, List
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pyspark is only needed for type hints; pure-Python at runtime
     from pyspark.sql import DataFrame
@@ -24,9 +25,9 @@ class Expectation:
     severity: str = "warn"  # 'warn' or 'fail'
 
 
-def evaluate(df: DataFrame, expectations: Iterable[Expectation]) -> List[dict]:
+def evaluate(df: DataFrame, expectations: Iterable[Expectation]) -> list[dict]:
     """Run every expectation and return a structured result list."""
-    results: List[dict] = []
+    results: list[dict] = []
     total = df.count()
     for exp in expectations:
         bad = df.filter(f"NOT ({exp.predicate})").count()

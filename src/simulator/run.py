@@ -13,13 +13,13 @@ from __future__ import annotations
 import random
 import time
 import uuid
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Iterator, List, Mapping, Tuple
 
 from src.simulator.behavior import (
-    DEVICES,
     DEVICE_WEIGHTS,
+    DEVICES,
     BehaviorEngine,
     Product,
     SessionContext,
@@ -27,8 +27,8 @@ from src.simulator.behavior import (
 from src.simulator.emit import emit_events, emit_snapshot
 from src.simulator.entities import EntityGenerator
 
-DEFAULT_COUNTRIES: List[str] = ["US", "GB", "DE", "FR", "BR", "JP", "ES", "IT"]
-DEFAULT_REFERRERS: List[object] = [None, "google", "facebook", "instagram", "direct"]
+DEFAULT_COUNTRIES: list[str] = ["US", "GB", "DE", "FR", "BR", "JP", "ES", "IT"]
+DEFAULT_REFERRERS: list[object] = [None, "google", "facebook", "instagram", "direct"]
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,7 @@ class LandingPaths:
     events: str
 
     @classmethod
-    def from_root(cls, root: str) -> "LandingPaths":
+    def from_root(cls, root: str) -> LandingPaths:
         return cls(users=f"{root}/users",
                    products=f"{root}/products",
                    events=f"{root}/events")
@@ -54,7 +54,7 @@ def bootstrap_entities(
     *,
     signup_window_days: int = 365,
     now: datetime | None = None,
-) -> Tuple[List[dict], List[dict]]:
+) -> tuple[list[dict], list[dict]]:
     """Generate the deterministic user + product population.
 
     ``now`` is injectable so tests can pin the clock; production callers
@@ -79,10 +79,10 @@ def bootstrap_entities(
 
 
 def write_initial_snapshots(
-    users: List[dict],
-    products: List[dict],
+    users: list[dict],
+    products: list[dict],
     paths: LandingPaths,
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
     """Write one users + one products snapshot to the landing volume."""
     u_path = emit_snapshot(users,    paths.users,    "users")
     p_path = emit_snapshot(products, paths.products, "products")
@@ -96,8 +96,8 @@ SessionStream = Callable[[int], Iterator[dict]]
 
 
 def make_session_stream(
-    users: List[dict],
-    products: List[dict],
+    users: list[dict],
+    products: list[dict],
     cfg: Mapping,
 ) -> SessionStream:
     """Build a deterministic session-stream generator from entities + cfg.
@@ -141,7 +141,7 @@ def run_burst(
     n_sessions: int,
     paths: LandingPaths,
     cfg: Mapping,
-) -> List[str]:
+) -> list[str]:
     """Emit ``n_sessions`` sessions in a single shot. Returns written paths."""
     return list(emit_events(
         stream(n_sessions),

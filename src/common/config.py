@@ -14,14 +14,14 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any
 
 import yaml
 
 DEFAULT_CONF_DIR = Path(__file__).resolve().parents[2] / "conf"
 
 
-def load_config(name: str, conf_dir: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
+def load_config(name: str, conf_dir: str | Path | None = None) -> dict[str, Any]:
     """Load and return the YAML config identified by ``name`` (no extension)."""
     base = Path(conf_dir) if conf_dir else DEFAULT_CONF_DIR
     path = base / f"{name}.yml"
@@ -35,7 +35,7 @@ def load_config(name: str, conf_dir: Optional[Union[str, Path]] = None) -> Dict[
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _apply_env_overrides(cfg: Dict[str, Any], prefix: str) -> Dict[str, Any]:
+def _apply_env_overrides(cfg: dict[str, Any], prefix: str) -> dict[str, Any]:
     flat = _flatten(cfg)
     for key in list(flat.keys()):
         env_key = f"ECOM_{prefix}_" + key.replace(".", "_").upper()
@@ -44,8 +44,8 @@ def _apply_env_overrides(cfg: Dict[str, Any], prefix: str) -> Dict[str, Any]:
     return _unflatten(flat)
 
 
-def _flatten(d: Dict[str, Any], parent: str = "") -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
+def _flatten(d: dict[str, Any], parent: str = "") -> dict[str, Any]:
+    out: dict[str, Any] = {}
     for k, v in d.items():
         key = f"{parent}.{k}" if parent else k
         if isinstance(v, dict):
@@ -55,8 +55,8 @@ def _flatten(d: Dict[str, Any], parent: str = "") -> Dict[str, Any]:
     return out
 
 
-def _unflatten(flat: Dict[str, Any]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
+def _unflatten(flat: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
     for key, value in flat.items():
         cursor = out
         parts = key.split(".")

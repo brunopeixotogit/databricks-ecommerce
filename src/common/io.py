@@ -11,8 +11,8 @@ by hand, so renaming a schema is a single-line change.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable, Optional
 
 from delta.tables import DeltaTable
 from pyspark.sql import DataFrame, SparkSession
@@ -54,7 +54,7 @@ def upsert(
     target: TableRef,
     source: DataFrame,
     keys: Iterable[str],
-    update_columns: Optional[Iterable[str]] = None,
+    update_columns: Iterable[str] | None = None,
 ) -> None:
     """Idempotent upsert via Delta ``MERGE``.
 
@@ -80,7 +80,7 @@ def upsert(
 def overwrite(
     df: DataFrame,
     target: TableRef,
-    partition_by: Optional[Iterable[str]] = None,
+    partition_by: Iterable[str] | None = None,
 ) -> None:
     writer = (
         df.write.format("delta")
@@ -95,7 +95,7 @@ def overwrite(
 def append(
     df: DataFrame,
     target: TableRef,
-    partition_by: Optional[Iterable[str]] = None,
+    partition_by: Iterable[str] | None = None,
 ) -> None:
     writer = df.write.format("delta").mode("append")
     if partition_by:
@@ -106,7 +106,7 @@ def append(
 def optimize(
     spark: SparkSession,
     target: TableRef,
-    zorder: Optional[Iterable[str]] = None,
+    zorder: Iterable[str] | None = None,
 ) -> None:
     sql = f"OPTIMIZE {target.fqn}"
     if zorder:

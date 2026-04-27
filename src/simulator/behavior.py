@@ -19,16 +19,16 @@ from __future__ import annotations
 import math
 import random
 import uuid
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Iterator, List, Mapping, Optional
 
 from src.common.version import SCHEMA_VERSION
 
-DEVICES: List[str] = ["mobile", "desktop", "tablet"]
-DEVICE_WEIGHTS: List[float] = [0.62, 0.30, 0.08]
+DEVICES: list[str] = ["mobile", "desktop", "tablet"]
+DEVICE_WEIGHTS: list[float] = [0.62, 0.30, 0.08]
 
-PAYMENT_METHODS: List[str] = [
+PAYMENT_METHODS: list[str] = [
     "credit_card", "paypal", "apple_pay", "google_pay", "klarna"
 ]
 
@@ -45,15 +45,15 @@ class Product:
 @dataclass
 class SessionContext:
     session_id: str
-    user_id: Optional[str]
+    user_id: str | None
     start_ts: datetime
     device: str
     country: str
     user_agent: str
     ip: str
-    referrer: Optional[str]
-    cart_id: Optional[str] = None
-    cart_items: List[dict] = field(default_factory=list)
+    referrer: str | None
+    cart_id: str | None = None
+    cart_items: list[dict] = field(default_factory=list)
 
 
 class BehaviorEngine:
@@ -66,7 +66,7 @@ class BehaviorEngine:
     def simulate_session(
         self,
         ctx: SessionContext,
-        catalog: List[Product],
+        catalog: list[Product],
     ) -> Iterator[dict]:
         if not catalog:
             return
@@ -76,7 +76,7 @@ class BehaviorEngine:
         n_views = max(1, min(30, int(self.rng.expovariate(1.0 / lam))))
 
         ts = ctx.start_ts
-        viewed: List[Product] = []
+        viewed: list[Product] = []
         for _ in range(n_views):
             ts += timedelta(seconds=self.rng.randint(5, 90))
             product = self.rng.choice(catalog)
@@ -131,10 +131,10 @@ class BehaviorEngine:
         event_type: str,
         ctx: SessionContext,
         ts: datetime,
-        product: Optional[Product] = None,
-        quantity: Optional[int] = None,
-        order_id: Optional[str] = None,
-        payment_method: Optional[str] = None,
+        product: Product | None = None,
+        quantity: int | None = None,
+        order_id: str | None = None,
+        payment_method: str | None = None,
     ) -> dict:
         return {
             "event_id": uuid.uuid4().hex,

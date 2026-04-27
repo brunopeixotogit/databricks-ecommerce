@@ -3,7 +3,6 @@ fake a minimal DataFrame-like with ``filter`` + ``count``."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List
 
 import pytest
 
@@ -12,16 +11,19 @@ from src.common.quality import Expectation, enforce, evaluate
 
 @dataclass
 class FakeDF:
-    rows: List[dict]
+    rows: list[dict]
 
     def filter(self, expr: str):
         # extremely small SQL subset: "NOT (col IS NOT NULL)" / "col >= 0"
         # tests use simple expressions only.
         if expr.startswith("NOT ("):
             inner = expr[5:-1]
-            keep = lambda r: not _eval(inner, r)
+
+            def keep(r: dict) -> bool:
+                return not _eval(inner, r)
         else:
-            keep = lambda r: _eval(expr, r)
+            def keep(r: dict) -> bool:
+                return _eval(expr, r)
         return FakeDF([r for r in self.rows if keep(r)])
 
     def count(self) -> int:

@@ -32,7 +32,7 @@ def spark():
     pure-Python suite without installing PySpark's ~300 MB footprint.
     Install PySpark locally with ``pip install -e .[spark]``.
     """
-    pyspark = pytest.importorskip(
+    pytest.importorskip(
         "pyspark",
         reason="PySpark not installed — install with `pip install -e .[spark]`",
     )

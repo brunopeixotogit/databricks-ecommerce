@@ -1,8 +1,6 @@
 """Tests for the YAML config loader and env-var override mechanism."""
 from __future__ import annotations
 
-from pathlib import Path
-
 from src.common.config import load_config
 
 

@@ -9,28 +9,28 @@ from __future__ import annotations
 
 import random
 import uuid
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Dict, Iterator, List, Mapping, Sequence
 
 from faker import Faker
 
 from src.common.version import SCHEMA_VERSION
 
-CATEGORIES: List[str] = ["electronics", "appliances", "furniture"]
+CATEGORIES: list[str] = ["electronics", "appliances", "furniture"]
 
-SUBCATEGORIES: Dict[str, List[str]] = {
+SUBCATEGORIES: dict[str, list[str]] = {
     "electronics": ["smartphone", "laptop", "tv", "headphones", "camera", "tablet", "smartwatch"],
     "appliances":  ["refrigerator", "washer", "dryer", "oven", "microwave", "dishwasher", "vacuum"],
     "furniture":   ["sofa", "bed", "table", "chair", "wardrobe", "desk", "bookshelf"],
 }
 
-BRANDS: Dict[str, List[str]] = {
+BRANDS: dict[str, list[str]] = {
     "electronics": ["Acme", "Nimbus", "Volta", "Pixelon", "Hertz", "Quanta"],
     "appliances":  ["Coldwave", "Hearthline", "Kettlewise", "Polaris", "Frostpeak"],
     "furniture":   ["Oakhaus", "Norden", "LoomCo", "Pinecrest", "Linden"],
 }
 
-LOYALTY_TIERS: List[str] = ["bronze", "silver", "gold", "platinum"]
+LOYALTY_TIERS: list[str] = ["bronze", "silver", "gold", "platinum"]
 
 
 class EntityGenerator:
