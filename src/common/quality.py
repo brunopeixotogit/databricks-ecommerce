@@ -11,9 +11,10 @@ plain PySpark pipelines (Free Edition).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List
+from typing import TYPE_CHECKING, Iterable, List
 
-from pyspark.sql import DataFrame
+if TYPE_CHECKING:  # pyspark is only needed for type hints; pure-Python at runtime
+    from pyspark.sql import DataFrame
 
 
 @dataclass(frozen=True)

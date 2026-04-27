@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Iterator, List, Mapping, Optional
 
-from src.common.schemas import SCHEMA_VERSION
+from src.common.version import SCHEMA_VERSION
 
 DEVICES: List[str] = ["mobile", "desktop", "tablet"]
 DEVICE_WEIGHTS: List[float] = [0.62, 0.30, 0.08]

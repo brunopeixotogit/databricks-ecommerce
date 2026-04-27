@@ -14,7 +14,7 @@ from typing import Dict, Iterator, List, Mapping, Sequence
 
 from faker import Faker
 
-from src.common.schemas import SCHEMA_VERSION
+from src.common.version import SCHEMA_VERSION
 
 CATEGORIES: List[str] = ["electronics", "appliances", "furniture"]
 

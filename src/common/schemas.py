@@ -19,7 +19,16 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
-SCHEMA_VERSION = "1.0.0"
+from src.common.version import SCHEMA_VERSION  # re-exported for back-compat
+
+__all__ = [
+    "SCHEMA_VERSION",
+    "EVENT_SCHEMA",
+    "USER_SCHEMA",
+    "PRODUCT_SCHEMA",
+    "ORDER_ITEM_SCHEMA",
+    "ORDER_SCHEMA",
+]
 
 # ---------------------------------------------------------------------------
 # Event envelope: shared by page_view, add_to_cart, purchase, abandon_cart.
