@@ -27,9 +27,10 @@ GOLD    = dbutils.widgets.get("gold_schema")
 VOLUME  = dbutils.widgets.get("volume_name")
 
 # COMMAND ----------
-# MAGIC %md ## Schemas + Volume
+# MAGIC %md ## Catalog + Schemas + Volume
 
 # COMMAND ----------
+spark.sql(f"CREATE CATALOG IF NOT EXISTS `{CATALOG}`")
 for s in (BRONZE, SILVER, GOLD):
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS `{CATALOG}`.`{s}`")
 spark.sql(f"CREATE VOLUME IF NOT EXISTS `{CATALOG}`.`{BRONZE}`.`{VOLUME}`")

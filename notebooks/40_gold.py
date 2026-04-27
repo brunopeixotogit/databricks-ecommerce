@@ -60,7 +60,7 @@ build_user_360(
 
 # COMMAND ----------
 optimize(spark, TableRef(CATALOG, GOLD, "fact_daily_sales"),
-         zorder=["sale_date", "category"])
+         zorder=["category", "country"])
 
 # COMMAND ----------
 # MAGIC %md ## Quick smoke

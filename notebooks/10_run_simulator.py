@@ -10,6 +10,12 @@
 # MAGIC - `continuous` — keep generating in a loop until the notebook is cancelled.
 
 # COMMAND ----------
+# MAGIC %pip install faker
+
+# COMMAND ----------
+dbutils.library.restartPython()
+
+# COMMAND ----------
 import os, sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.getcwd(), "..")))
 
