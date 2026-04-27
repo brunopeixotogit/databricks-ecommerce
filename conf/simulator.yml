@@ -1,0 +1,46 @@
+# Simulator parameters. Tune these to mimic different traffic profiles
+# (e.g. Black Friday burst, low-season weekday, mobile-heavy region).
+
+seed: 42
+
+users:
+  initial_population: 10000
+  daily_signups_mean: 200
+  daily_signups_stddev: 50
+  marketing_opt_in_rate: 0.6
+  loyalty_distribution:
+    bronze:   0.60
+    silver:   0.25
+    gold:     0.12
+    platinum: 0.03
+
+products:
+  catalog_size: 5000
+  category_weights:
+    electronics: 0.50
+    appliances:  0.30
+    furniture:   0.20
+  price_ranges:
+    electronics: [29.99, 2499.00]
+    appliances:  [89.00,  3500.00]
+    furniture:   [49.00,  1899.00]
+  active_rate: 0.97
+
+traffic:
+  sessions_per_minute_peak: 600
+  sessions_per_minute_offpeak: 80
+  weekend_multiplier: 1.4
+  marketing_burst_probability: 0.02
+  anonymous_session_rate: 0.30
+
+behavior:
+  page_views_per_session_lambda: 4.5
+  add_to_cart_probability: 0.18
+  checkout_given_cart: 0.45
+  purchase_given_checkout: 0.78
+  abandonment_idle_minutes: 30
+
+emission:
+  rows_per_file: 5000
+  compress: true
+  rotation_seconds: 60

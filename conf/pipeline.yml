@@ -1,0 +1,39 @@
+# Pipeline configuration consumed by every layer.
+# Override any leaf with env var: ECOM_PIPELINE_<DOTTED_KEY_UPPER>
+# (e.g. ECOM_PIPELINE_CATALOG=dev_main)
+
+catalog: main
+
+schemas:
+  bronze: ecom_bronze
+  silver: ecom_silver
+  gold:   ecom_gold
+
+volume:
+  catalog: main
+  schema:  ecom_bronze
+  name:    landing
+  paths:
+    events:   events
+    users:    users
+    products: products
+    orders:   orders
+
+streaming:
+  trigger: availableNow            # availableNow | continuous | "30 seconds"
+  checkpoint_root: /Volumes/main/ecom_bronze/landing/_checkpoints
+  watermark_minutes: 60
+
+session:
+  inactivity_minutes: 30           # gap that splits a new session
+
+quality:
+  rescued_data_quarantine: /Volumes/main/ecom_bronze/landing/_quarantine
+  max_late_arriving_minutes: 1440  # 24h hard cutoff for late events
+
+optimize:
+  zorder:
+    bronze.events_raw:  [event_ts, user_id]
+    silver.events:      [event_ts, user_id, session_id_silver]
+    silver.fact_orders: [order_ts, user_id]
+    gold.fact_daily_sales: [sale_date, category]
