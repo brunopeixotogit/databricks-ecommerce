@@ -25,7 +25,7 @@ The pipeline is one Workflow with a linear DAG:
 
 The DAG is end-to-end idempotent: running it twice over an unchanged input produces a Gold byte-equivalent (modulo Delta history).
 
-The full DAG was validated end-to-end against the dev workspace (run `136243658787310`, ~4m 35s wall-clock from `RUNNING` → `TERMINATED SUCCESS`); the same path now executes automatically on every push to `main` via [`.github/workflows/cd.yml`](../.github/workflows/cd.yml).
+The full DAG was validated end-to-end against the dev workspace (run `136243658787310`, ~4m 35s wall-clock from `RUNNING` → `TERMINATED SUCCESS`); the same path now executes automatically on every push to `main` that touches pipeline-relevant paths, via [`.github/workflows/cd.yml`](../.github/workflows/cd.yml). Docs-only pushes are intentionally skipped — see § 1.1 *When CD does not run*.
 
 ---
 
@@ -52,6 +52,16 @@ git push origin main
 ```
 
 A typical merge takes **~6 minutes wall-clock**: ~90 s CI matrix → ~30 s deploy → ~4 min DAG execution.
+
+### When CD does **not** run
+
+CD is path-filtered. A push to `main` only triggers `cd.yml` when at least one of these paths changed:
+
+```
+src/**   notebooks/**   databricks.yml   conf/**   .github/workflows/**
+```
+
+A **docs-only commit** (`README.md`, `docs/**`, any `*.md`) still runs CI but does **not** deploy to Databricks — saves workspace compute and avoids redundant job runs. To force a redeploy without a code change (e.g. after configuring secrets), use **Actions → CD — deploy to dev → Run workflow** (`workflow_dispatch` ignores the path filter).
 
 ### Watching a deploy
 
@@ -87,7 +97,7 @@ pytest --cov=src --cov-report=term
 
 ### Re-running the Databricks job manually
 
-CD runs the medallion automatically on every push. To trigger an extra run **without a code change** (e.g. after fixing a transient issue or producer drift):
+CD runs the medallion automatically on every push that touches pipeline-relevant paths (see § 1.1 path filter). To trigger an extra run **without any commit** (e.g. after fixing a transient issue, producer drift, or after configuring secrets):
 
 ```bash
 # From your laptop — same auth as CD uses

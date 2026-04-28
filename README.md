@@ -173,7 +173,7 @@ Two GitHub Actions workflows protect and promote `main`. Both are **active and r
 - **Config validation** — every `conf/*.yml` is loaded through `src.common.config.load_config`
 - **Secret scanning** — Gitleaks across the full git history (advisory)
 
-### CD runs on every push to `main`
+### CD runs on push to `main` — **only when pipeline-relevant paths change**
 
 `.github/workflows/cd.yml`:
 
@@ -181,6 +181,18 @@ Two GitHub Actions workflows protect and promote `main`. Both are **active and r
 - `databricks bundle validate --target dev`
 - `databricks bundle deploy --target dev` (uploads notebooks, updates Job definition)
 - `databricks bundle run --target dev medallion` (executes the full Bronze → Silver → Gold DAG)
+
+**Path filter on the `push` trigger.** CD evaluates whether at least one of the following paths changed in the commit; if not, the workflow is skipped and **no Databricks compute is consumed**:
+
+```
+src/**
+notebooks/**
+databricks.yml
+conf/**
+.github/workflows/**
+```
+
+A docs-only commit (`README.md`, `docs/**`, any `*.md`) merges to `main`, runs CI for code-health verification, and **does not** trigger a Databricks deploy or job run. `workflow_dispatch` (manual runs) has no path filter — the **Run workflow** button always reruns CD.
 
 ### End-to-end flow
 
@@ -209,6 +221,37 @@ git push origin main
         (fact_daily_sales, fact_funnel,
          fact_abandoned_carts, dim_user_360)
 ```
+
+### Current architecture state
+
+Three independent layers, all live and consistent with the code:
+
+| Layer | What's running | Where it's defined |
+|---|---|---|
+| **Data pipeline (Bronze → Silver → Gold)** | 7-task DAG: `00_setup` → `01_create_tables` → `10_run_simulator` → `20_bronze` → `30_silver` → `40_gold` → `99_quality_checks`. Idempotent end-to-end (Auto Loader checkpoints, Delta `MERGE` on `event_id`, hash-driven SCD2, full-rebuild Gold). | `notebooks/`, `src/{bronze,silver,gold,common}/` |
+| **Orchestration — Databricks Asset Bundle** | One Workflow `[dev bru_peixoto] ecom-medallion` declared in `databricks.yml`. Two targets (`dev` / `prod`). Schedule **PAUSED** by design; runs are triggered by CD. | `databricks.yml` |
+| **CI/CD — GitHub Actions** | `ci.yml` (lint + matrix tests + config validation + secrets scan) on every PR/push; `cd.yml` (bundle validate / deploy / run) on push to `main`, **path-filtered to pipeline-relevant changes**. | `.github/workflows/` |
+
+Coverage scope is intentionally limited to pure-Python modules (`fail_under = 60 %`, currently 79 %). PySpark-bound modules are exercised by Databricks at deploy time, not by the default CI lane.
+
+### Deployment rules
+
+The single source of truth for "when does anything run":
+
+| Event | CI runs? | CD runs? | Databricks deploy? |
+|---|---|---|---|
+| PR opened / updated against `main` | ✅ | ❌ | ❌ |
+| Push to `main` touching `src/**`, `notebooks/**`, `databricks.yml`, `conf/**`, or `.github/workflows/**` | ✅ | ✅ | ✅ |
+| Push to `main` touching **only** `*.md` / `docs/**` / other non-pipeline files | ✅ | ❌ skipped by path filter | ❌ |
+| Manual **Run workflow** on `cd.yml` (workflow_dispatch) | n/a | ✅ always | ✅ |
+| Push to a non-`main` branch | ❌ | ❌ | ❌ |
+| Tag push (`v*.*.*`) — prod release | ❌ | ❌ (prod CD intentionally not wired yet) | ❌ |
+
+**What prevents unnecessary executions:**
+- Docs-only commits are skipped at the workflow level via `on.push.paths` in `cd.yml` — no runner spins up, no Databricks compute is consumed.
+- `concurrency.group: cd-dev` with `cancel-in-progress: false` serialises deploys without killing them mid-flight.
+- The Workflow schedule in `databricks.yml` is **PAUSED** — runs only happen when CD (or a human) triggers them, never on a hidden cron.
+- `99_quality_checks` is the final task: a `severity="fail"` predicate violation aborts the run so stale data never gets blessed as "deployed."
 
 ### Required GitHub Secrets
 

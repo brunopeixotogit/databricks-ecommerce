@@ -1,6 +1,6 @@
 # CI/CD
 
-How the project is tested, validated, and deployed. **CI and dev CD are both live**: every push to `main` runs the test matrix and, on green, deploys the Asset Bundle to the dev workspace and runs the medallion job end-to-end. The only intentional gap is **prod CD** (tag-gated, see § 8.4).
+How the project is tested, validated, and deployed. **CI and dev CD are both live**: every push to `main` runs the CI test matrix; CD runs on the same push **only when pipeline-relevant paths change** (`src/**`, `notebooks/**`, `databricks.yml`, `conf/**`, `.github/workflows/**`) — docs-only commits skip the deploy. The only intentional gap is **prod CD** (tag-gated, see § 8.4).
 
 Lifecycle:
 
@@ -216,7 +216,15 @@ name: CD — deploy to dev
 on:
   push:
     branches: [main]
-  workflow_dispatch:
+    # Skip the Databricks deploy when only documentation / repo metadata
+    # changed. Saves workspace compute and avoids redundant job runs.
+    paths:
+      - 'src/**'
+      - 'notebooks/**'
+      - 'databricks.yml'
+      - 'conf/**'
+      - '.github/workflows/**'
+  workflow_dispatch:   # manual reruns always work — no path filter
 
 concurrency:
   group: cd-dev
@@ -256,6 +264,20 @@ jobs:
 - **`concurrency.cancel-in-progress: false`** — cancelling a deploy mid-flight can leave the workspace half-deployed. Worth waiting.
 - **No PR trigger** — PRs run CI (`ci.yml`) only. Deploys happen after merge, when `main` is canonical. PR contributors never have credentials to a real workspace.
 - **No matrix** — one runner, one target. The CI matrix exists to catch Python-version drift; deploys are environment-specific.
+- **Path filter on `push`** — a docs-only commit (`README.md`, `docs/**`, any `*.md`) merges to `main` but does not trigger CD. CI still runs to verify code health. The filter is the native GitHub Actions `on.push.paths` keyword — no third-party action, no conditional `if:` logic. `workflow_dispatch` is intentionally left unfiltered so manual reruns always work.
+
+#### When CD runs vs. when it doesn't
+
+| Event | CD triggered? |
+|---|---|
+| Push to `main` touching `src/**`, `notebooks/**`, `databricks.yml`, `conf/**`, or `.github/workflows/**` | ✅ |
+| Mixed commit with at least one path above (e.g. `src/silver/events.py` + `README.md`) | ✅ |
+| Push to `main` touching **only** `*.md` / `docs/**` / other non-pipeline files | ❌ skipped at the workflow level |
+| Manual **Run workflow** in the Actions UI (`workflow_dispatch`) | ✅ always |
+| Pull-request open / synchronise events | ❌ (CI runs, CD never) |
+| Push to a non-`main` branch | ❌ |
+
+Branch-protection caveat: if CD is marked as a *required status check*, doc-only PRs will appear stuck waiting for CD to report. Either don't mark it required, or split CD into a "filter" job that always runs plus a deploy job gated on the filter's output.
 
 ### 8.3 Required GitHub Secrets
 
