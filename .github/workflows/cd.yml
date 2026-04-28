@@ -1,12 +1,20 @@
 name: CD — deploy to dev
 
-# Continuously delivers main into the dev Databricks workspace.
+# Two modes, single workflow:
 #
-# Flow per push to main:
-#   1. Install Databricks CLI
-#   2. Validate the Asset Bundle against the dev target (offline)
-#   3. Deploy the bundle to the dev workspace
-#   4. Trigger the medallion Workflow run
+#   pull_request → main : VALIDATION ONLY
+#       Runs `databricks bundle validate --target dev`. No workspace
+#       mutation — no deploy, no job run. Gives PR authors fast,
+#       safe feedback that databricks.yml + bundle references are healthy
+#       before merge.
+#
+#   push → main          : FULL DEPLOY
+#       Runs validate → deploy → run medallion. This is the canonical
+#       promotion path for the dev workspace.
+#
+# Both triggers share the same path filter: docs-only commits / PRs
+# never hit the workspace and never waste runner minutes on a no-op.
+# `workflow_dispatch` has no path filter so a manual rerun always works.
 #
 # Production deploys live in a separate, tag-gated workflow (not yet wired —
 # see docs/ci_cd.md). This file deliberately deploys only to dev.
@@ -14,24 +22,27 @@ name: CD — deploy to dev
 on:
   push:
     branches: [main]
-    # Path filter: skip the Databricks deploy when only documentation /
-    # repo metadata changed. Saves Databricks compute and avoids redundant
-    # workspace job runs when no pipeline code actually moved.
-    #
-    # CD runs only when one of these paths is touched:
     paths:
       - 'src/**'
       - 'notebooks/**'
       - 'databricks.yml'
       - 'conf/**'
       - '.github/workflows/**'
-  # workflow_dispatch has no `paths` filter by design — manual runs should
-  # always work (e.g. force a redeploy after fixing the dev secrets).
+  pull_request:
+    branches: [main]
+    # Same paths as push — irrelevant docs-only PRs don't run validate
+    # either. CI (ci.yml) still runs unconditionally on every PR.
+    paths:
+      - 'src/**'
+      - 'notebooks/**'
+      - 'databricks.yml'
+      - 'conf/**'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 concurrency:
-  # Serialise dev deploys. Never cancel an in-flight deploy — that can leave
-  # the workspace in a half-deployed state.
+  # Serialise dev deploys. Never cancel an in-flight deploy — that can
+  # leave the workspace in a half-deployed state.
   group: cd-dev
   cancel-in-progress: false
 
@@ -43,8 +54,10 @@ jobs:
     name: Validate · deploy · run (dev)
     runs-on: ubuntu-latest
 
-    # Use a GitHub Environment so DATABRICKS_* secrets are scoped to dev only
-    # and we get an audit trail per deployment.
+    # `environment: dev` scopes DATABRICKS_* secrets to this job. PRs
+    # from forks do not get access to environment secrets by GitHub's
+    # security model — `bundle validate` will fail in that case, which
+    # is the correct behaviour (no untrusted code can reach the workspace).
     environment: dev
 
     env:
@@ -58,24 +71,37 @@ jobs:
       - name: Install Databricks CLI
         uses: databricks/setup-cli@main
 
+      # Auth probe is only meaningful when we're about to mutate the
+      # workspace. Skip on PR — we just want to know the bundle is valid.
       - name: Show CLI + auth context
+        if: github.event_name != 'pull_request'
         run: |
           databricks --version
           databricks current-user me --output json | jq '.userName, .id' || true
 
+      # ─────────────────────────────────────────────────────────────────
+      # ALWAYS RUNS — the only step a PR ever executes.
+      # `bundle validate` resolves variables and references; safe for PRs.
+      # ─────────────────────────────────────────────────────────────────
       - name: Validate bundle (dev target)
-        # Offline check — fails fast on YAML / reference errors.
         run: databricks bundle validate --target dev
 
+      # ─────────────────────────────────────────────────────────────────
+      # PUSH-TO-MAIN ONLY — these steps mutate the dev workspace.
+      # Every step below is gated on `github.event_name != 'pull_request'`
+      # so a PR can never deploy or run.
+      # ─────────────────────────────────────────────────────────────────
       - name: Deploy bundle (dev target)
+        if: github.event_name != 'pull_request'
         # Idempotent. Re-uploads notebooks, updates the medallion Job
         # definition, leaves the schedule PAUSED per databricks.yml.
         run: databricks bundle deploy --target dev
 
       - name: Run medallion job
+        if: github.event_name != 'pull_request'
         # Synchronous run; surfaces task-level failures back to GitHub Actions.
         run: databricks bundle run --target dev medallion
 
       - name: Print deployed resources
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         run: databricks bundle summary --target dev
