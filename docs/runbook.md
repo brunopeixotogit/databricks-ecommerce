@@ -25,13 +25,13 @@ The pipeline is one Workflow with a linear DAG:
 
 The DAG is end-to-end idempotent: running it twice over an unchanged input produces a Gold byte-equivalent (modulo Delta history).
 
-The full DAG was validated end-to-end against the dev workspace (run `136243658787310`, ~4m 35s wall-clock from `RUNNING` → `TERMINATED SUCCESS`); the same path now executes automatically on every push to `main` that touches pipeline-relevant paths, via [`.github/workflows/cd.yml`](../.github/workflows/cd.yml). Docs-only pushes are intentionally skipped — see § 1.1 *When CD does not run*.
+The full DAG was validated end-to-end against the dev workspace (run `136243658787310`, ~4m 35s wall-clock from `RUNNING` → `TERMINATED SUCCESS`); it is now triggered manually via `databricks bundle run --target dev medallion`. The path that CD auto-executes on every push to `main` is the **DLT pipeline** (`ecom_dlt_pipeline`), not the medallion job — see [`.github/workflows/cd.yml`](../.github/workflows/cd.yml) and § 1.2 below. Docs-only pushes skip CD entirely — see § 1.1 *When CD does not run*.
 
 ---
 
 ## 1.1 · Canonical execution path — `git push`
 
-The pipeline runs automatically. **Manual execution (§ 2 below) is only for first-time setup and debugging.**
+The DLT pipeline runs automatically on push to `main`. The medallion Workflow job is still deployed but **no longer auto-run** by CD — trigger it manually if you want to re-run the notebook DAG. **Manual execution of notebooks (§ 2 below) is only for first-time setup and debugging.**
 
 ```
 git push origin main
@@ -42,26 +42,35 @@ git push origin main
         ▼
   CD (.github/workflows/cd.yml)
         │   databricks bundle validate --target dev
-        │   databricks bundle deploy   --target dev
-        │   databricks bundle run      --target dev medallion
+        │   databricks bundle deploy   --target dev          (deploys job + DLT)
+        │   databricks bundle run      --target dev ecom_dlt_pipeline   (DLT only)
+        │   post-run query: SELECT * FROM dev_main.ecom_dlt.fact_daily_sales LIMIT 10
         ▼
-  Databricks Workflow runs (7 tasks)
-        │   setup → create_tables → simulate → bronze → silver → gold → quality
+  Databricks DLT update runs on serverless compute
+        │   bronze (events_raw, users_raw, products_raw)
+        │   silver (events, dim_users_scd2, dim_products_scd2, fact_orders)
+        │   gold   (fact_daily_sales, fact_funnel, fact_abandoned_carts, dim_user_360)
         ▼
-  Gold tables refreshed in dev_main.ecom_gold
+  DLT Gold tables refreshed in dev_main.ecom_dlt
 ```
 
-A typical merge takes **~6 minutes wall-clock**: ~90 s CI matrix → ~30 s deploy → ~4 min DAG execution.
+A typical merge takes **~5 minutes wall-clock**: ~90 s CI matrix → ~30 s deploy → ~1 min DLT update + ~30 s post-run validation.
+
+To run the medallion Workflow as well:
+
+```bash
+databricks bundle run --target dev medallion
+```
 
 ### When CD does **not** run
 
 CD is path-filtered. A push to `main` only triggers `cd.yml` when at least one of these paths changed:
 
 ```
-src/**   notebooks/**   databricks.yml   conf/**   .github/workflows/**
+src/**   notebooks/**   pipelines/**   databricks.yml   conf/**   .github/workflows/**
 ```
 
-A **docs-only commit** (`README.md`, `docs/**`, any `*.md`) still runs CI but does **not** deploy to Databricks — saves workspace compute and avoids redundant job runs. To force a redeploy without a code change (e.g. after configuring secrets), use **Actions → CD — deploy to dev → Run workflow** (`workflow_dispatch` ignores the path filter).
+A **docs-only commit** (`README.md`, `docs/**`, any `*.md`) still runs CI but does **not** deploy to Databricks — saves workspace compute and avoids redundant runs. To force a redeploy without a code change (e.g. after configuring secrets), use **Actions → CD — deploy to dev → Run workflow** (`workflow_dispatch` ignores the path filter).
 
 ### Watching a deploy
 
@@ -97,7 +106,7 @@ pytest --cov=src --cov-report=term
 
 ### Re-running the Databricks job manually
 
-CD runs the medallion automatically on every push that touches pipeline-relevant paths (see § 1.1 path filter). To trigger an extra run **without any commit** (e.g. after fixing a transient issue, producer drift, or after configuring secrets):
+CD auto-runs **only** the DLT pipeline on every push that touches pipeline-relevant paths (see § 1.1 path filter). The medallion Workflow is deployed by `bundle deploy` but never auto-triggered — to run it (e.g. to repopulate `ecom_silver`/`ecom_gold`, side-by-side comparison, or to reproduce a CD failure on the imperative path):
 
 ```bash
 # From your laptop — same auth as CD uses
@@ -106,13 +115,15 @@ databricks bundle run --target dev medallion
 
 Or in the workspace UI: open the job page → **Run now**. Either path uses the bundle's already-deployed Job definition.
 
-To re-trigger CD itself (for example to test a re-deploy without a commit), use **Actions → CD — deploy to dev → Run workflow**.
+To re-trigger CD itself (for example to test a re-deploy without a commit), use **Actions → CD — deploy to dev → Run workflow** — `workflow_dispatch` ignores the path filter.
 
 ---
 
-## 1.2 · DLT pipeline (alternative execution path)
+## 1.2 · DLT pipeline (the path CD runs automatically)
 
-The same medallion logic also runs as a **Delta Live Tables** pipeline declared at [`pipelines/dlt/`](../pipelines/dlt/). The Workflow described in §1 remains the canonical path on Free Edition; the DLT pipeline is an additive alternative for environments where DLT's declarative model and managed compute are preferred. Both paths share the landing Volume but write to **different schemas**, so they never contend on the same Delta table.
+The DLT pipeline lives at [`pipelines/dlt/`](../pipelines/dlt/) and is the path CD executes on every push to `main`. It is fully **self-contained**: it does not depend on `src/`. The three source schemas live at `pipelines/dlt/schemas.py` (lockstep mirror of `src/common/schemas.py`); `bronze.py`, `silver.py`, `gold.py` import them as a sibling module loaded by the DLT runtime via the `libraries` list in `databricks.yml`. No `sys.path` tricks, no `__file__` references.
+
+Both paths share the landing Volume (`/Volumes/<catalog>/ecom_bronze/landing/...`) but write to **different output schemas** — Workflow → `ecom_silver` / `ecom_gold`; DLT → `ecom_dlt` — so they never contend on the same Delta table.
 
 ### Choosing a target
 

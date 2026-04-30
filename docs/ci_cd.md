@@ -6,10 +6,13 @@ Lifecycle:
 
 ```
 PR opened → CI runs (ci.yml) → green → merge to main
-        → CD runs (cd.yml) → bundle validate → deploy → run medallion
-        → Databricks workspace executes 7-task DAG (00_setup … 99_quality_checks)
-        → Gold tables refreshed
+        → CD runs (cd.yml) → bundle validate → deploy → run ecom_dlt_pipeline
+        → Databricks runs the DLT pipeline on serverless compute
+        → DLT Gold tables refreshed in <catalog>.ecom_dlt
+        → post-run sample query validates data is present
 ```
+
+The medallion Workflow job is still **deployed** by `bundle deploy --target dev` but no longer **auto-run** by CD — trigger it manually with `databricks bundle run --target dev medallion` when needed.
 
 Code: `.github/workflows/ci.yml`, `.github/workflows/cd.yml`, `databricks.yml`, `pyproject.toml`, `tests/`.
 
@@ -245,16 +248,17 @@ jobs:
       - uses: databricks/setup-cli@main
       - run: databricks bundle validate --target dev
       - run: databricks bundle deploy   --target dev
-      - run: databricks bundle run      --target dev medallion
       - run: databricks bundle run      --target dev ecom_dlt_pipeline
-      # Post-run sanity: SELECT * LIMIT 10 against fact_daily_sales in both
-      # Gold schemas (ecom_gold for the job, ecom_dlt for the pipeline).
-      # Failure of either query fails the workflow.
+      # Post-run sanity: SELECT * LIMIT 10 against
+      # dev_main.ecom_dlt.fact_daily_sales. A failed or empty query
+      # fails the workflow.
 ```
 
-#### Both pipelines must succeed
+#### What CD runs (and what it doesn't)
 
-After deploy, CD executes the medallion job **and** the DLT pipeline. Either failing fails the workflow — feature parity between the two paths is enforced at the CD layer, not just at the code layer. A separate post-run validation step queries `fact_daily_sales` in both Gold schemas (`SELECT * LIMIT 10`) and prints the sample to the workflow log; an empty or failed query is a hard failure. The validation step automatically degrades to a warning if no SQL warehouse is available in the workspace (Free Edition: a small warehouse is normally present).
+After deploy, CD executes **only** `ecom_dlt_pipeline`; a failed DLT update or any `expect_or_fail` violation fails the workflow. The medallion job is deployed by `bundle deploy` but is **not** auto-run — it must be triggered manually with `databricks bundle run --target dev medallion` when a notebook-DAG run is wanted (e.g. to repopulate the `ecom_silver`/`ecom_gold` schemas, or for side-by-side comparison).
+
+A separate post-run validation step queries `dev_main.ecom_dlt.fact_daily_sales` (`SELECT * LIMIT 10`) and prints the sample to the workflow log; an empty or failed query is a hard failure. The step degrades to a warning if no SQL warehouse is available in the workspace (Free Edition normally has a small Serverless warehouse).
 
 #### What each step does
 
@@ -263,10 +267,11 @@ After deploy, CD executes the medallion job **and** the DLT pipeline. Either fai
 | `databricks/setup-cli@main` | Installs the Databricks CLI on the runner | runner-side install failure |
 | `bundle validate --target dev` | Offline syntax + reference check | typo in `databricks.yml`; bad variable interpolation |
 | `bundle deploy --target dev` | Idempotent. Uploads notebooks, updates the Job definition, leaves schedule PAUSED | workspace permission denied; bad token; auth host mismatch |
-| `bundle run --target dev medallion` | Synchronous run of the Workflow job; bubbles task failures up to GitHub Actions | task-level errors surface as workflow failures |
-| `bundle run --target dev ecom_dlt_pipeline` | Synchronous run of the DLT pipeline (managed compute, no cluster declared) | DLT update failure or `expect_or_fail` violation fails the workflow |
-| Post-run validation | `SELECT * LIMIT 10` from `fact_daily_sales` in both Gold schemas via `databricks sql query` | empty/failed query → workflow fails |
+| `bundle run --target dev ecom_dlt_pipeline` | Synchronous run of the DLT pipeline on serverless compute | DLT update failure or `expect_or_fail` violation fails the workflow |
+| Post-run validation | `SELECT * LIMIT 10` from `dev_main.ecom_dlt.fact_daily_sales` via `databricks sql query` | empty/failed query → workflow fails |
 | `bundle summary --target dev` | (`if: always()`) prints the deployed resources for log forensics | — |
+
+The medallion Workflow job is **not** in this list — it is deployed but not auto-run. Run it manually with `databricks bundle run --target dev medallion`.
 
 #### Why these choices
 
@@ -280,8 +285,8 @@ After deploy, CD executes the medallion job **and** the DLT pipeline. Either fai
 
 | Event | CD triggered? |
 |---|---|
-| Push to `main` touching `src/**`, `notebooks/**`, `databricks.yml`, `conf/**`, or `.github/workflows/**` | ✅ |
-| Mixed commit with at least one path above (e.g. `src/silver/events.py` + `README.md`) | ✅ |
+| Push to `main` touching `src/**`, `notebooks/**`, `pipelines/**`, `databricks.yml`, `conf/**`, or `.github/workflows/**` | ✅ |
+| Mixed commit with at least one path above (e.g. `pipelines/dlt/silver.py` + `README.md`) | ✅ |
 | Push to `main` touching **only** `*.md` / `docs/**` / other non-pipeline files | ❌ skipped at the workflow level |
 | Manual **Run workflow** in the Actions UI (`workflow_dispatch`) | ✅ always |
 | Pull-request open / synchronise events | ❌ (CI runs, CD never) |
@@ -313,22 +318,39 @@ Use OAuth M2M tokens (not personal access tokens) — they're scoped, rotatable,
 
 DAB declares **the whole job topology** in code, version-controlled, reviewable. It deploys notebooks, jobs, schedules, and (when declared) cluster definitions in one transaction. Manual notebook copy/paste between workspaces drifts; DAB does not.
 
-### 8.6 Compute model — managed / serverless-style on Free Edition
+### 8.6 Compute model — serverless on Free Edition
 
 `databricks.yml` deliberately declares **no** `job_clusters`, `new_cluster`, `node_type_id`, or worker configuration. Both execution paths run on Databricks-managed compute provisioned by the workspace at run time:
 
 - The Workflow job (`medallion`) reuses the Free Edition shared cluster.
-- The DLT pipeline (`ecom_dlt_pipeline`) runs on a serverless-style DLT cluster the runtime provisions for the update; it is configured with `development: true` and `continuous: false` so each update is a finite run that releases compute on completion.
+- The DLT pipeline (`ecom_dlt_pipeline`) is declared with `serverless: true`, `development: true`, `continuous: false`. Free Edition **mandates** serverless compute for DLT — without `serverless: true` the deploy fails with `You must use serverless compute in this workspace`. Each update is a finite run that releases compute on completion.
 
 This keeps the bundle portable across Free Edition workspaces and avoids hard-coded cluster shapes that would break under different SKUs.
 
-### 8.7 Targets — full deploy vs. DLT-only
+### 8.7 Workflow vs DLT — when to use each
+
+Both paths cover the same medallion logic. They differ in **how** the work is expressed and operated.
+
+| Question | Pick the **Workflow job** (`medallion`) | Pick the **DLT pipeline** (`ecom_dlt_pipeline`) |
+|---|---|---|
+| You want declarative table definitions and lineage in the UI | — | ✅ |
+| You want pipelines that re-use the test-covered `src/` modules | ✅ | — |
+| You need per-step orchestration (notebook tasks, retries per task) | ✅ | — |
+| You want one decorator per quality predicate, with metrics in the event log | — | ✅ |
+| You want this to run automatically on every push to `main` | — | ✅ (CD's default) |
+| You want a one-off run for backfill / debug / replay | ✅ trigger via `bundle run … medallion` | ✅ trigger via `bundle run … ecom_dlt_pipeline` |
+| You're on Free Edition and need to avoid extra serverless minutes | ✅ uses the shared cluster | — |
+| You're showcasing a production-ready declarative pipeline | — | ✅ |
+
+**Rule of thumb:** the DLT pipeline is the canonical CD-driven path; the Workflow job is the manually-triggered alternative that exercises the imperative `src/` codebase end-to-end.
+
+### 8.8 Targets — full deploy vs. DLT-only
 
 `databricks.yml` declares **three** targets:
 
 | Target          | What it deploys                                      | Use when…                                              |
 |-----------------|------------------------------------------------------|--------------------------------------------------------|
-| `dev` (default) | Workflow job (`medallion`) **+** DLT pipeline (`ecom_dlt_pipeline`) | Standard dev workflow — both execution paths active    |
+| `dev` (default) | Workflow job (`medallion`) **+** DLT pipeline (`ecom_dlt_pipeline`) | Standard dev workflow — both resources available; CD auto-runs only DLT |
 | `dev_dlt_only`  | DLT pipeline **only** — the Workflow job is not pushed | Iterating on `pipelines/dlt/*` without touching the job |
 | `prod`          | Job + DLT pipeline (`development: false` on the pipeline) | Tag-gated production promotion (planned, see §8.4)     |
 
@@ -340,8 +362,8 @@ databricks bundle deploy --target dev
 databricks bundle deploy --target dev_dlt_only
 
 # Run a specific resource
-databricks bundle run --target dev medallion             # Workflow job
-databricks bundle run --target dev ecom_dlt_pipeline     # DLT pipeline
+databricks bundle run --target dev ecom_dlt_pipeline     # DLT pipeline (CD's default)
+databricks bundle run --target dev medallion             # Workflow job (manual only)
 ```
 
 #### How partial deploys work
@@ -352,7 +374,7 @@ The DLT pipeline (`ecom_dlt_pipeline`) is declared at the bundle root, so it dep
 
 #### What the path filter sees
 
-CD's `on.push.paths` filter (§8.2) already includes `databricks.yml`, `src/**`, and `notebooks/**`. The new `pipelines/**` directory should be added to the path filter so DLT-only changes also trigger CD; until that change ships, push a no-op edit to `databricks.yml` or use **Run workflow** (`workflow_dispatch`) to force a redeploy after editing `pipelines/dlt/*`.
+CD's `on.push.paths` filter (§8.2) covers `src/**`, `notebooks/**`, `pipelines/**`, `databricks.yml`, `conf/**`, `.github/workflows/**`. Edits to any DLT module under `pipelines/dlt/` therefore trigger CD on their own.
 
 ---
 

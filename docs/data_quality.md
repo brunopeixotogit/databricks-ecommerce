@@ -1,8 +1,11 @@
 # Data Quality
 
-Data quality in this project is **declarative, executable, and gating**. Expectations are SQL predicates that should evaluate `TRUE` for every valid row. They run as the final task of the Workflow; failures abort the run before stale data reaches Gold consumers.
+Data quality in this project is **declarative, executable, and gating**. Expectations are SQL predicates that should evaluate `TRUE` for every valid row. The same predicates run in **both execution paths**:
 
-Code: `src/common/quality.py`, `notebooks/99_quality_checks.py`.
+- **Workflow path** — `notebooks/99_quality_checks.py` runs the `Expectation` framework as the final task; an `enforce()` failure aborts the Workflow.
+- **DLT path** — the same predicates are encoded as `@dlt.expect_or_fail` / `@dlt.expect` decorators directly on the `silver.events` and `silver.fact_orders` table definitions in `pipelines/dlt/silver.py`; an `expect_or_fail` violation fails the DLT update.
+
+Code: `src/common/quality.py`, `notebooks/99_quality_checks.py`, `pipelines/dlt/silver.py`.
 
 ---
 
@@ -168,25 +171,43 @@ The current framework checks **invariants**, not anomalies. There's no statistic
 | SQL predicates | Python validators (`def check(df) -> bool`) | Readable by analysts; storage-agnostic; loadable from YAML later |
 | Two severity levels | Three (info/warn/fail) | Simpler; "info" tier in practice degenerates into noise |
 | Gate at end of pipeline (after Gold write) | Gate before Gold write | Simpler; failed runs are visible; corrective re-runs are easy thanks to `overwrite` |
-| Hand-rolled framework | DLT expectations | DLT is unavailable on Free Edition; the helper migrates trivially when we promote |
+| Hand-rolled framework (Workflow) | Only DLT expectations | The framework is the only option for the notebook DAG; we now have **both** paths in parallel — see §7 |
 | Hand-rolled framework | Great Expectations | Heavier; more dependencies; not worth the weight at this scale |
 
 ---
 
-## 7 · Migration to DLT (when promoted)
+## 7 · DLT expectations — parity with the framework
 
-In a paid Databricks workspace, replace the helper with DLT expectations:
+The DLT pipeline encodes the **same predicates with the same severities** as the Workflow path. Each `Expectation` in `notebooks/99_quality_checks.py` has a one-to-one DLT equivalent in `pipelines/dlt/silver.py`:
 
-```python
-@dlt.expect_or_fail("event_id_not_null", "event_id IS NOT NULL")
-@dlt.expect_or_drop("non_negative_price", "price IS NULL OR price >= 0")
-@dlt.expect("order_total_matches", "abs(total - (subtotal + tax + shipping)) < 0.05")
-@dlt.table
-def silver_events():
-    return (...)
-```
+| Workflow `Expectation` (severity) | DLT decorator on `silver.events` / `silver.fact_orders` |
+|---|---|
+| `event_id_not_null` (fail) | `@dlt.expect_or_fail("event_id_not_null", "event_id IS NOT NULL")` |
+| `valid_event_type` (fail) | `@dlt.expect_or_fail("valid_event_type", "event_type IN ('page_view','add_to_cart','purchase','abandon_cart')")` |
+| `session_id_silver_present` (fail) | `@dlt.expect_or_fail("session_id_silver_present", "session_id_silver IS NOT NULL")` |
+| `purchase_has_order_id` (fail) | `@dlt.expect_or_fail("purchase_has_order_id", "event_type <> 'purchase' OR order_id IS NOT NULL")` |
+| `non_negative_price` (warn) | `@dlt.expect("non_negative_price", "price IS NULL OR price >= 0")` |
+| `positive_quantity` (warn) | `@dlt.expect("positive_quantity", "quantity IS NULL OR quantity > 0")` |
+| `order_total_positive` (fail) | `@dlt.expect_or_fail("order_total_positive", "total >= 0")` |
+| `order_subtotal_consistent` (fail) | `@dlt.expect_or_fail("order_subtotal_consistent", "subtotal >= 0")` |
+| `order_has_items` (fail) | `@dlt.expect_or_fail("order_has_items", "size(items) > 0")` |
+| `order_total_matches` (warn) | `@dlt.expect("order_total_matches", "abs(total - (subtotal + tax + shipping)) < 0.05")` |
 
-DLT integrates with lineage, the event log, and emits expectation metrics natively. The contract — predicate + severity — is the same; only the substrate changes. That's by design: keeping the same vocabulary lets the migration be mostly mechanical.
+### Behavioural differences
+
+| Aspect | Workflow framework | DLT expectations |
+|---|---|---|
+| Where it runs | Final task of the DAG, after Silver + Gold are written | Inline on the table definition; evaluated as rows flow through |
+| `fail` semantics | `enforce()` raises; run aborts; Gold from this run remains in place but the run is `FAILED` | The DLT update fails; the table version is rolled back; downstream tables in the same update are skipped |
+| `warn` semantics | Counted, logged, no abort | Counted, surfaced in the DLT event log, no abort |
+| Visibility | Stdout in the cell + Workflow log | Per-expectation drop counters in the DLT UI + event log |
+| Lineage integration | None (it's just a notebook) | Native — expectation metrics tagged with table version |
+
+The vocabulary (predicate + severity) is identical, so a rule added in one path is mechanically portable to the other.
+
+### When predicates diverge
+
+The two paths share the same Bronze landing Volume but write to **different schemas** (Workflow → `ecom_silver`/`ecom_gold`; DLT → `ecom_dlt`). If a predicate must change, update **both** definitions in the same PR; CI verifies neither path drifts in isolation.
 
 ---
 

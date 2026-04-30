@@ -73,3 +73,6 @@ secrets/
 
 # --- Claude Code local state ---------------------------------------------
 .claude/
+
+# --- Local-only learning notes (PT-BR study guide; never tracked) --------
+docs_ptbr/

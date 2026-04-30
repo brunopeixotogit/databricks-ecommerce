@@ -35,7 +35,7 @@ The full technical write-up is split into focused documents under [`docs/`](./do
 | [`docs/ci_cd.md`](./docs/ci_cd.md)                   | GitHub Actions, Databricks Asset Bundles, deploy plan |
 | [`docs/runbook.md`](./docs/runbook.md)               | Step-by-step run, debugging, reprocessing |
 
-> **Two execution paths.** The medallion logic ships as both a Workflow-based job (the canonical path) and a Delta Live Tables pipeline (`pipelines/dlt/`). See **[DLT Pipeline (Alternative Execution Path)](#dlt-pipeline-alternative-execution-path)** below.
+> **Two execution paths.** The medallion logic ships as a notebook-based **Workflow job** (`medallion`) **and** a self-contained **Delta Live Tables pipeline** (`pipelines/dlt/`). CD auto-runs the DLT pipeline; the Workflow job is deployed and triggered manually. See **[DLT Pipeline (Alternative Execution Path)](#dlt-pipeline-alternative-execution-path)** below.
 
 ---
 
@@ -181,14 +181,18 @@ Two GitHub Actions workflows protect and promote `main`. Both are **active and r
 
 - Installs the Databricks CLI (`databricks/setup-cli@main`)
 - `databricks bundle validate --target dev`
-- `databricks bundle deploy --target dev` (uploads notebooks, updates Job definition)
-- `databricks bundle run --target dev medallion` (executes the full Bronze → Silver → Gold DAG)
+- `databricks bundle deploy --target dev` (uploads notebooks + DLT pipeline, updates Job definition)
+- `databricks bundle run --target dev ecom_dlt_pipeline` (runs the DLT pipeline on serverless compute)
+- post-run sanity: `SELECT * LIMIT 10` from `dev_main.ecom_dlt.fact_daily_sales`
+
+The medallion Workflow job is deployed but **not auto-run** — trigger it manually with `databricks bundle run --target dev medallion`.
 
 **Path filter on the `push` trigger.** CD evaluates whether at least one of the following paths changed in the commit; if not, the workflow is skipped and **no Databricks compute is consumed**:
 
 ```
 src/**
 notebooks/**
+pipelines/**
 databricks.yml
 conf/**
 .github/workflows/**
@@ -209,17 +213,20 @@ git push origin main
                        │ green
                        ▼
 ┌──────────────── CD (cd.yml) ────────────────┐
-│  bundle validate → deploy → run medallion    │
+│  bundle validate → deploy → run DLT pipeline │
+│  → post-run sample query                     │
 └──────────────────────┬───────────────────────┘
                        │
                        ▼
-┌────────── Databricks workspace ─────────────┐
-│  setup → create_tables → simulate →          │
-│  bronze → silver → gold → quality            │
+┌────────── Databricks DLT update ────────────┐
+│  bronze (events_raw, users_raw, products_raw)│
+│  → silver (events, dims, fact_orders)        │
+│  → gold   (4 marts)                          │
 └──────────────────────┬───────────────────────┘
                        │
                        ▼
-            Gold tables refreshed
+       DLT Gold tables refreshed in
+        dev_main.ecom_dlt
         (fact_daily_sales, fact_funnel,
          fact_abandoned_carts, dim_user_360)
 ```
@@ -230,9 +237,9 @@ Three independent layers, all live and consistent with the code:
 
 | Layer | What's running | Where it's defined |
 |---|---|---|
-| **Data pipeline (Bronze → Silver → Gold)** | 7-task DAG: `00_setup` → `01_create_tables` → `10_run_simulator` → `20_bronze` → `30_silver` → `40_gold` → `99_quality_checks`. Idempotent end-to-end (Auto Loader checkpoints, Delta `MERGE` on `event_id`, hash-driven SCD2, full-rebuild Gold). | `notebooks/`, `src/{bronze,silver,gold,common}/` |
-| **Orchestration — Databricks Asset Bundle** | One Workflow `[dev bru_peixoto] ecom-medallion` declared in `databricks.yml`. Two targets (`dev` / `prod`). Schedule **PAUSED** by design; runs are triggered by CD. | `databricks.yml` |
-| **CI/CD — GitHub Actions** | `ci.yml` (lint + matrix tests + config validation + secrets scan) on every PR/push; `cd.yml` (bundle validate / deploy / run) on push to `main`, **path-filtered to pipeline-relevant changes**. | `.github/workflows/` |
+| **Data pipeline (Bronze → Silver → Gold)** | Two execution paths over the same medallion logic. **Workflow `medallion`** — 7-task DAG: `00_setup` → `01_create_tables` → `10_run_simulator` → `20_bronze` → `30_silver` → `40_gold` → `99_quality_checks`. **DLT `ecom_dlt_pipeline`** — declarative `@dlt.table` pipeline on serverless compute. Both idempotent end-to-end. | `notebooks/`, `src/{bronze,silver,gold,common}/`, `pipelines/dlt/` |
+| **Orchestration — Databricks Asset Bundle** | Three targets (`dev`, `dev_dlt_only`, `prod`). The Workflow schedule is **PAUSED** by design; the medallion job is triggered manually. The DLT pipeline is auto-run by CD on every push to `main`. | `databricks.yml` |
+| **CI/CD — GitHub Actions** | `ci.yml` (lint + matrix tests + config validation + secrets scan) on every PR/push; `cd.yml` (bundle validate → deploy → run **DLT pipeline** → post-run sample query) on push to `main`, **path-filtered to pipeline-relevant changes**. | `.github/workflows/` |
 
 Coverage scope is intentionally limited to pure-Python modules (`fail_under = 60 %`, currently 79 %). PySpark-bound modules are exercised by Databricks at deploy time, not by the default CI lane.
 
@@ -243,7 +250,7 @@ The single source of truth for "when does anything run":
 | Event | CI runs? | CD runs? | Databricks deploy? |
 |---|---|---|---|
 | PR opened / updated against `main` | ✅ | ❌ | ❌ |
-| Push to `main` touching `src/**`, `notebooks/**`, `databricks.yml`, `conf/**`, or `.github/workflows/**` | ✅ | ✅ | ✅ |
+| Push to `main` touching `src/**`, `notebooks/**`, `pipelines/**`, `databricks.yml`, `conf/**`, or `.github/workflows/**` | ✅ | ✅ | ✅ |
 | Push to `main` touching **only** `*.md` / `docs/**` / other non-pipeline files | ✅ | ❌ skipped by path filter | ❌ |
 | Manual **Run workflow** on `cd.yml` (workflow_dispatch) | n/a | ✅ always | ✅ |
 | Push to a non-`main` branch | ❌ | ❌ | ❌ |
@@ -252,8 +259,8 @@ The single source of truth for "when does anything run":
 **What prevents unnecessary executions:**
 - Docs-only commits are skipped at the workflow level via `on.push.paths` in `cd.yml` — no runner spins up, no Databricks compute is consumed.
 - `concurrency.group: cd-dev` with `cancel-in-progress: false` serialises deploys without killing them mid-flight.
-- The Workflow schedule in `databricks.yml` is **PAUSED** — runs only happen when CD (or a human) triggers them, never on a hidden cron.
-- `99_quality_checks` is the final task: a `severity="fail"` predicate violation aborts the run so stale data never gets blessed as "deployed."
+- The Workflow schedule in `databricks.yml` is **PAUSED** — the medallion job runs only when a human triggers it (`databricks bundle run --target dev medallion`), never on a hidden cron and never automatically by CD.
+- Quality gates run in **both paths**: `99_quality_checks` is the final task of the Workflow (a `fail` predicate aborts the run); the DLT pipeline encodes the same predicates as `@dlt.expect_or_fail` decorators (a violation fails the DLT update). Stale data never gets blessed as "deployed."
 
 ### Required GitHub Secrets
 
@@ -435,7 +442,7 @@ The architectural shape — medallion, event-first, decoupled producer — stays
 
 ## DLT Pipeline (Alternative Execution Path)
 
-The same Bronze → Silver → Gold logic is also packaged as a **Delta Live Tables** pipeline under [`pipelines/dlt/`](./pipelines/dlt/) (`bronze.py`, `silver.py`, `gold.py`). The DLT pipeline is **additive** — the existing notebook-based Workflow is unchanged and remains the canonical path.
+The same Bronze → Silver → Gold logic is also packaged as a **Delta Live Tables** pipeline under [`pipelines/dlt/`](./pipelines/dlt/) (`schemas.py`, `bronze.py`, `silver.py`, `gold.py`). The DLT pipeline is **self-contained** — it does not import from `src/`; the source schemas live at `pipelines/dlt/schemas.py` in lockstep with `src/common/schemas.py`. CD auto-runs this pipeline on every push to `main`; the Workflow job is deployed but triggered manually.
 
 ```
 ┌─────────────────────────┐        ┌─────────────────────────┐
@@ -454,17 +461,18 @@ The same Bronze → Silver → Gold logic is also packaged as a **Delta Live Tab
 
 | Concern             | Workflow job                            | DLT pipeline                                       |
 |---------------------|-----------------------------------------|----------------------------------------------------|
-| Compute model       | Notebook tasks on a shared cluster      | DLT-managed pipeline cluster                       |
+| Compute model       | Notebook tasks on a shared cluster      | Serverless DLT compute (`serverless: true` — Free Edition requirement) |
 | Checkpoints         | Hand-managed under `_checkpoints/`      | Owned by the DLT runtime                           |
 | Idempotency         | Delta `MERGE` + `overwrite` in `src/`   | Built-in: full materialised-view rebuild           |
 | Quality gates       | `99_quality_checks` (`Expectation`)     | `@dlt.expect` / `@dlt.expect_or_fail` per table   |
 | Lineage             | Implicit (notebook order)               | Explicit DAG in the DLT UI                         |
 | Observability       | Workflow run page + cell output         | DLT event log + per-expectation drop counters     |
 | Schema evolution    | `cloudFiles.schemaEvolutionMode=rescue` | Same, plus DLT-tracked schema versions             |
-| Cost on Free Edition| Lower — reuses the shared cluster       | Higher — dedicated DLT compute                     |
-| Best for…           | Small / cost-sensitive / Free Edition   | Production scale, strict SLAs, declarative ops     |
+| Code reuse          | Imports from `src/` (shared with tests) | Self-contained under `pipelines/dlt/` (DLT runtime cannot import `src/`) |
+| Auto-run by CD      | No — manual `bundle run` only           | ✅ yes, on every push to `main`                    |
+| Best for…           | Backfills / replay / exercising `src/`  | Daily auto-runs · declarative ops · observability  |
 
-**Tradeoffs in one sentence:** the Workflow job is cheaper and simpler on Free Edition; DLT is more declarative and observable but spins its own cluster. Use the job for daily operation here, and use DLT to demonstrate (or migrate to) a fully-managed pipeline runtime.
+**Tradeoffs in one sentence:** the DLT pipeline is the canonical CD-driven path with native lineage and observability; the Workflow job exercises the imperative `src/` codebase end-to-end and is the better fit for backfills or replay.
 
 The DLT path writes to a separate schema (`${var.dlt_schema}`, default `ecom_dlt`) so it never contends on the same Delta tables as the job.
 
@@ -482,7 +490,7 @@ databricks bundle run --target dev medallion             # Workflow job
 databricks bundle run --target dev ecom_dlt_pipeline     # DLT pipeline
 ```
 
-> **Compute model.** This project runs on **Databricks Free Edition** with **managed (serverless-style) compute**. `databricks.yml` does **not** declare any `job_clusters`, `new_cluster`, `node_type_id`, or worker configuration — the workspace provisions compute implicitly for both the Workflow job and the DLT pipeline. CD runs **both** paths back-to-back (`bundle run … medallion` then `bundle run … ecom_dlt_pipeline`) and a post-run step queries `fact_daily_sales` in each Gold schema to confirm rows landed; if either pipeline fails, the workflow fails.
+> **Compute model.** This project runs on **Databricks Free Edition** with **managed / serverless compute**. `databricks.yml` does **not** declare any `job_clusters`, `new_cluster`, `node_type_id`, or worker configuration. The DLT pipeline runs with `serverless: true` (Free Edition mandates it); the Workflow job reuses the shared cluster. CD auto-runs **only** `ecom_dlt_pipeline` on push to `main`, then queries `dev_main.ecom_dlt.fact_daily_sales` (`SELECT * LIMIT 10`) as a post-run sanity check; if the DLT update fails or the query returns nothing, the workflow fails. The medallion Workflow job is deployed but must be triggered manually via `databricks bundle run --target dev medallion`.
 
 See [`docs/ci_cd.md`](./docs/ci_cd.md) for target / partial-deploy details and [`docs/runbook.md`](./docs/runbook.md) for first-run + debugging.
 

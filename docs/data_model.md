@@ -2,7 +2,7 @@
 
 This document captures the **shape of the data** at every layer — the pinned schemas, the entity relationships, and the modelling decisions that hold the lakehouse together.
 
-Code: `src/common/schemas.py`, `src/common/version.py`.
+Code: `src/common/schemas.py`, `src/common/version.py`, plus a self-contained mirror at `pipelines/dlt/schemas.py` for the DLT pipeline (the DLT runtime cannot reach into `src/`, so the three source schemas — `EVENT_SCHEMA`, `USER_SCHEMA`, `PRODUCT_SCHEMA` — are duplicated there in lockstep). Any producer schema change must update **both** files.
 
 ---
 
