@@ -33,6 +33,7 @@ The full technical write-up is split into focused documents under [`docs/`](./do
 | [`docs/data_model.md`](./docs/data_model.md)         | Pinned schemas, ER relationships |
 | [`docs/data_quality.md`](./docs/data_quality.md)     | Expectation framework, severity, failure handling |
 | [`docs/ci_cd.md`](./docs/ci_cd.md)                   | GitHub Actions, Databricks Asset Bundles, deploy plan |
+| [`docs/dlt_pipeline.md`](./docs/dlt_pipeline.md)     | End-to-end DLT pipeline: code structure, execution model, deployment |
 | [`docs/runbook.md`](./docs/runbook.md)               | Step-by-step run, debugging, reprocessing |
 
 > **Two execution paths.** The medallion logic ships as a notebook-based **Workflow job** (`medallion`) **and** a self-contained **Delta Live Tables pipeline** (`pipelines/dlt/`). CD auto-runs the DLT pipeline; the Workflow job is deployed and triggered manually. See **[DLT Pipeline (Alternative Execution Path)](#dlt-pipeline-alternative-execution-path)** below.

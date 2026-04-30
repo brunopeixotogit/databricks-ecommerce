@@ -9,6 +9,7 @@
 | [`data_model.md`](./data_model.md)         | Pinned schemas, ER relationships, modelling decisions |
 | [`data_quality.md`](./data_quality.md)     | Expectation framework, severity levels, failure handling |
 | [`ci_cd.md`](./ci_cd.md)                   | GitHub Actions, test strategy, Databricks Asset Bundles, deploy plan |
+| [`dlt_pipeline.md`](./dlt_pipeline.md)     | End-to-end DLT pipeline: code structure, execution model, deployment |
 | [`runbook.md`](./runbook.md)               | Step-by-step run, debugging guide, reprocessing strategy |
 
 Top-level entry points:

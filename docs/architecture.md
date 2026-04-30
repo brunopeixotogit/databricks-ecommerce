@@ -175,6 +175,8 @@ The architectural shape — medallion, event-first, decoupled producer — stays
 
 ## 7 · DLT Pipeline (Alternative Execution Path)
 
+> Full end-to-end reference for the DLT pipeline lives in [`dlt_pipeline.md`](./dlt_pipeline.md) (code structure, execution model, deployment, anti-patterns). This section is the architectural summary.
+
 The same medallion logic also ships as a **Delta Live Tables** pipeline under [`pipelines/dlt/`](../pipelines/dlt/). The DLT pipeline is additive — the Workflow job described in §1–6 is unchanged and remains the notebook-based path. Both paths are now **fully functional and verified end-to-end** in the dev workspace.
 
 The DLT pipeline is **self-contained**: it does **not** import from `src/`. The three source schemas (`EVENT_SCHEMA`, `USER_SCHEMA`, `PRODUCT_SCHEMA`) are duplicated at `pipelines/dlt/schemas.py` in lockstep with `src/common/schemas.py`. The two paths share the **landing Volume** (Bronze input) but write to **different output schemas**, so they cannot contend on the same Delta tables.
