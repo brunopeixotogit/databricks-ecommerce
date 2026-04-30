@@ -50,6 +50,7 @@ resources:
       catalog: ${var.catalog}
       target: ${var.dlt_schema}
       libraries:
+        - file: { path: ./pipelines/dlt/schemas.py }   # shared schema module — must load before bronze
         - file: { path: ./pipelines/dlt/bronze.py }
         - file: { path: ./pipelines/dlt/silver.py }
         - file: { path: ./pipelines/dlt/gold.py }

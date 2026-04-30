@@ -99,25 +99,22 @@ jobs:
         # definition, leaves the schedule PAUSED per databricks.yml.
         run: databricks bundle deploy --target dev
 
-      - name: Run medallion job
-        if: github.event_name != 'pull_request'
-        # Synchronous run; surfaces task-level failures back to GitHub Actions.
-        # Failure here fails the workflow so the DLT path below is also tracked.
-        run: databricks bundle run --target dev medallion
+      # The medallion job is still DEPLOYED (it's part of `--target dev`)
+      # but it is intentionally NOT run from CD — only the DLT pipeline
+      # is executed automatically. Trigger medallion manually with
+      # `databricks bundle run --target dev medallion` if needed.
 
       - name: Run DLT pipeline (ecom_dlt_pipeline)
         if: github.event_name != 'pull_request'
-        # Second execution path. Synchronous; runs on Databricks-managed
-        # (serverless-style) compute — no cluster definition in databricks.yml.
-        # If this fails, the workflow fails: both pipelines must be green.
+        # Synchronous run on serverless DLT compute (Free Edition).
+        # Workflow fails if the pipeline update fails or any
+        # `expect_or_fail` expectation is violated.
         run: databricks bundle run --target dev ecom_dlt_pipeline
 
-      - name: Post-run validation — sample Gold output
+      - name: Post-run validation — sample DLT Gold output
         if: github.event_name != 'pull_request'
-        # Confirms data exists in both execution paths' Gold layer.
-        # Reads dev_main.ecom_gold.fact_daily_sales (medallion job output)
-        # and dev_main.ecom_dlt.fact_daily_sales (DLT pipeline output).
-        # SQL warehouse selection: first available; the queries are tiny.
+        # Confirms the DLT pipeline produced rows in its Gold layer.
+        # Reads dev_main.ecom_dlt.fact_daily_sales (DLT pipeline output).
         run: |
           set -euo pipefail
           WH_ID=$(databricks warehouses list --output json | jq -r '.[0].id // empty')
@@ -127,16 +124,15 @@ jobs:
           fi
           echo "Using warehouse: $WH_ID"
 
-          for FQN in "dev_main.ecom_gold.fact_daily_sales" "dev_main.ecom_dlt.fact_daily_sales"; do
-            echo "--- Sample from $FQN ---"
-            databricks sql query \
-              --warehouse-id "$WH_ID" \
-              --query "SELECT * FROM ${FQN} LIMIT 10" || {
-                echo "::error::Validation query failed against ${FQN}"
-                exit 1
-              }
-          done
-          echo "Post-run validation: data present in both Gold tables."
+          FQN="dev_main.ecom_dlt.fact_daily_sales"
+          echo "--- Sample from $FQN ---"
+          databricks sql query \
+            --warehouse-id "$WH_ID" \
+            --query "SELECT * FROM ${FQN} LIMIT 10" || {
+              echo "::error::Validation query failed against ${FQN}"
+              exit 1
+            }
+          echo "Post-run validation: data present in $FQN."
 
       - name: Print deployed resources
         if: always() && github.event_name != 'pull_request'
