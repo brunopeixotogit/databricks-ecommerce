@@ -61,8 +61,10 @@ resources:
         ecom.volume:         ${var.volume}
         ecom.inactivity_minutes: "30"
       # Free Edition: no cluster / job_clusters / new_cluster declared.
-      # The DLT pipeline runs on Databricks-managed (serverless-style)
-      # compute provisioned by the runtime; cluster sizing is implicit.
+      # The DLT pipeline runs on serverless compute, which Free Edition
+      # mandates — `serverless: true` is required for the pipeline to
+      # deploy without "You must use serverless compute in this workspace".
+      serverless: true
       development: true
       continuous: false
 
