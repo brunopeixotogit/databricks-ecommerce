@@ -110,6 +110,69 @@ To re-trigger CD itself (for example to test a re-deploy without a commit), use 
 
 ---
 
+## 1.2 · DLT pipeline (alternative execution path)
+
+The same medallion logic also runs as a **Delta Live Tables** pipeline declared at [`pipelines/dlt/`](../pipelines/dlt/). The Workflow described in §1 remains the canonical path on Free Edition; the DLT pipeline is an additive alternative for environments where DLT's declarative model and managed compute are preferred. Both paths share the landing Volume but write to **different schemas**, so they never contend on the same Delta table.
+
+### Choosing a target
+
+| Target          | Deploys                                      | When to use                                          |
+|-----------------|----------------------------------------------|------------------------------------------------------|
+| `dev` (default) | Workflow job + DLT pipeline                  | Standard dev work — both paths available             |
+| `dev_dlt_only`  | DLT pipeline only                            | Iterating on `pipelines/dlt/*` without touching the job |
+| `prod`          | Workflow job + DLT pipeline (production mode)| Tag-gated production promotion                       |
+
+### Running the DLT pipeline
+
+```bash
+# Validate first
+databricks bundle validate --target dev
+
+# Deploy + run (full bundle)
+databricks bundle deploy --target dev
+databricks bundle run    --target dev ecom_dlt_pipeline
+
+# Or: deploy only the DLT pipeline (job is untouched)
+databricks bundle deploy --target dev_dlt_only
+databricks bundle run    --target dev_dlt_only ecom_dlt_pipeline
+```
+
+In the workspace UI: **Pipelines → ecom-dlt → Start**. The DLT event log is at **Pipelines → ecom-dlt → Event log** (the per-expectation drop counts surface there too).
+
+### What gets created
+
+The DLT pipeline publishes every table to the schema named by `${var.dlt_schema}` (default `ecom_dlt`):
+
+| Layer | Tables (under `${catalog}.${dlt_schema}`)                                        |
+|-------|-----------------------------------------------------------------------------------|
+| Bronze| `events_raw`, `users_raw`, `products_raw`                                         |
+| Silver| `events`, `dim_users_scd2`, `dim_products_scd2`, `fact_orders`                    |
+| Gold  | `fact_daily_sales`, `fact_funnel`, `fact_abandoned_carts`, `dim_user_360`         |
+
+Table names match the Workflow path; only the schema differs. SQL templates pointing at `dev_main.ecom_silver.events` still work against `dev_main.ecom_dlt.events` with one find-and-replace.
+
+### Debugging DLT failures
+
+| Symptom | First place to look | Common causes / remedies |
+|---|---|---|
+| Pipeline update fails on `events_raw` | DLT event log → "Update progress" tab → click failed table | Landing path missing or empty (`/Volumes/<cat>/<bronze_schema>/landing/events`); pinned schema mismatched producer (check `_rescued_data` on bronze) |
+| `expect_or_fail` aborts an update | Same UI; "Data quality" panel shows which expectation tripped | Same root-cause list as `99_quality_checks` (see §5.8). Inspect failing rows directly under `${dlt_schema}.<table>` |
+| Update succeeds but tables are empty | Pipeline configuration → check `ecom.catalog`, `ecom.bronze_schema`, `ecom.volume` | Configuration block in `databricks.yml` not picked up — re-deploy with `--target dev` |
+| `import dlt` fails locally / in CI | `import dlt` only resolves in the DLT runtime | Do not run `pipelines/dlt/*.py` outside DLT; the CI lane intentionally does not import these files |
+| Expected schema not created | Unity Catalog permissions | The principal running the pipeline needs `CREATE SCHEMA` on the catalog; for Free Edition this is the workspace user |
+
+### Rollback / cleanup
+
+The DLT path is independent of the Workflow path. To remove DLT artefacts without touching the job:
+
+```bash
+databricks bundle destroy --target dev_dlt_only
+```
+
+Or drop the schema directly: `DROP SCHEMA IF EXISTS ${catalog}.${dlt_schema} CASCADE;`. The Workflow job's tables in `ecom_bronze` / `ecom_silver` / `ecom_gold` are unaffected.
+
+---
+
 ## 2 · First-time setup on Databricks Free Edition
 
 ### 2.1 Prerequisites

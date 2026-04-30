@@ -25,6 +25,7 @@ on:
     paths:
       - 'src/**'
       - 'notebooks/**'
+      - 'pipelines/**'
       - 'databricks.yml'
       - 'conf/**'
       - '.github/workflows/**'
@@ -35,6 +36,7 @@ on:
     paths:
       - 'src/**'
       - 'notebooks/**'
+      - 'pipelines/**'
       - 'databricks.yml'
       - 'conf/**'
       - '.github/workflows/**'
@@ -100,7 +102,41 @@ jobs:
       - name: Run medallion job
         if: github.event_name != 'pull_request'
         # Synchronous run; surfaces task-level failures back to GitHub Actions.
+        # Failure here fails the workflow so the DLT path below is also tracked.
         run: databricks bundle run --target dev medallion
+
+      - name: Run DLT pipeline (ecom_dlt_pipeline)
+        if: github.event_name != 'pull_request'
+        # Second execution path. Synchronous; runs on Databricks-managed
+        # (serverless-style) compute — no cluster definition in databricks.yml.
+        # If this fails, the workflow fails: both pipelines must be green.
+        run: databricks bundle run --target dev ecom_dlt_pipeline
+
+      - name: Post-run validation — sample Gold output
+        if: github.event_name != 'pull_request'
+        # Confirms data exists in both execution paths' Gold layer.
+        # Reads dev_main.ecom_gold.fact_daily_sales (medallion job output)
+        # and dev_main.ecom_dlt.fact_daily_sales (DLT pipeline output).
+        # SQL warehouse selection: first available; the queries are tiny.
+        run: |
+          set -euo pipefail
+          WH_ID=$(databricks warehouses list --output json | jq -r '.[0].id // empty')
+          if [ -z "$WH_ID" ]; then
+            echo "::warning::No SQL warehouse available — skipping post-run validation."
+            exit 0
+          fi
+          echo "Using warehouse: $WH_ID"
+
+          for FQN in "dev_main.ecom_gold.fact_daily_sales" "dev_main.ecom_dlt.fact_daily_sales"; do
+            echo "--- Sample from $FQN ---"
+            databricks sql query \
+              --warehouse-id "$WH_ID" \
+              --query "SELECT * FROM ${FQN} LIMIT 10" || {
+                echo "::error::Validation query failed against ${FQN}"
+                exit 1
+              }
+          done
+          echo "Post-run validation: data present in both Gold tables."
 
       - name: Print deployed resources
         if: always() && github.event_name != 'pull_request'

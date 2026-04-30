@@ -173,7 +173,69 @@ The architectural shape — medallion, event-first, decoupled producer — stays
 
 ---
 
-## 7 · Where to go next
+## 7 · DLT Pipeline (Alternative Execution Path)
+
+The same medallion logic also ships as a **Delta Live Tables** pipeline under [`pipelines/dlt/`](../pipelines/dlt/). The DLT pipeline is additive — the Workflow job described in §1–6 is unchanged and remains the canonical path. The two paths share `src/common/schemas.py` (pinned types) but operate on **different schemas**, so they cannot contend on the same Delta tables.
+
+### 7.1 Two execution paths over the same logic
+
+```
+                       ┌──────────────────────────┐
+                       │  Landing Volume (shared) │
+                       │   /Volumes/<cat>/        │
+                       │   <bronze_schema>/       │
+                       │   landing/{events,...}   │
+                       └────────────┬─────────────┘
+                                    │
+                ┌───────────────────┴────────────────────┐
+                ▼                                        ▼
+   ┌────────────────────────┐                ┌────────────────────────┐
+   │ Workflow `medallion`   │                │ DLT pipeline `ecom-dlt`│
+   │  notebooks/00 … 99     │                │  pipelines/dlt/*.py    │
+   │  imperative PySpark    │                │  declarative @dlt.table│
+   │  Auto Loader + MERGE   │                │  Auto Loader (DLT-     │
+   │  + manual checkpoints  │                │  managed checkpoints)  │
+   └────────────┬───────────┘                └────────────┬───────────┘
+                ▼                                         ▼
+   ${catalog}.ecom_bronze / silver / gold        ${catalog}.${dlt_schema}
+   (bronze_raw, events, fact_orders, …)          (same table names, one schema)
+```
+
+The DLT pipeline targets a **single schema** (`${var.dlt_schema}`, default `ecom_dlt`) for all bronze / silver / gold tables. Table names match the Workflow path (`events_raw`, `events`, `fact_daily_sales`, …) so query templates stay portable between the two — only the schema differs.
+
+### 7.2 What the DLT path replaces
+
+| Workflow piece                           | DLT equivalent                                   |
+|------------------------------------------|--------------------------------------------------|
+| `notebooks/20_bronze.py` + Auto Loader   | `pipelines/dlt/bronze.py` (`@dlt.table`, streaming) |
+| `notebooks/30_silver.py` + `src/silver`  | `pipelines/dlt/silver.py` (materialised views)   |
+| `notebooks/40_gold.py` + `src/gold`      | `pipelines/dlt/gold.py` (materialised views)     |
+| `notebooks/99_quality_checks.py`         | `@dlt.expect` / `@dlt.expect_or_fail` decorators |
+| Hand-managed `_checkpoints/<source>/`    | DLT-managed checkpoints (opaque to the user)     |
+| `OPTIMIZE … ZORDER BY` calls             | Predictive Optimization (when enabled at workspace)|
+
+### 7.3 Tradeoffs
+
+| Dimension           | Workflow job                              | DLT pipeline                                   |
+|---------------------|-------------------------------------------|------------------------------------------------|
+| **Cost**            | Reuses the shared cluster on Free Edition | Spins its own DLT pipeline cluster            |
+| **Simplicity**      | Plain notebooks, plain Spark APIs         | One DLT decorator per output table             |
+| **Observability**   | Workflow run page; cell output            | DLT event log; per-expectation drop counters   |
+| **Lineage**         | Implicit (notebook order)                 | Explicit DAG inferred from `dlt.read(...)`     |
+| **Idempotency**     | Hand-coded MERGE / overwrite              | Built-in: tables are rebuilt or appended       |
+| **Scalability**     | Manual cluster sizing                     | Pipeline cluster autoscales between min/max    |
+| **Schema evolution**| Auto Loader rescue mode                   | Same, plus DLT-tracked schema versions         |
+| **When to pick it** | Free Edition, small data, low SLA         | Production scale, strict SLA, declarative ops  |
+
+The two paths intentionally cover the same logic with different ergonomic / cost profiles. They are not staged — pick one per environment based on the SLA and budget.
+
+### 7.4 Bundle wiring
+
+Both resources live in [`databricks.yml`](../databricks.yml). The DLT pipeline (`ecom_dlt_pipeline`) is declared at the bundle root so every target inherits it; the Workflow job (`medallion`) is declared inside the `dev` and `prod` targets via a YAML anchor so a third target — `dev_dlt_only` — can deploy the DLT pipeline alone. See [`ci_cd.md`](./ci_cd.md) §8.6 for the deploy commands and [`runbook.md`](./runbook.md) §1.2 for runtime operation.
+
+---
+
+## 8 · Where to go next
 
 - Reading **for runtime behaviour** → [`bronze_layer.md`](./bronze_layer.md), [`silver_layer.md`](./silver_layer.md), [`gold_layer.md`](./gold_layer.md)
 - Reading **for the data shape** → [`data_model.md`](./data_model.md)

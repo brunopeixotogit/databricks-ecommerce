@@ -35,6 +35,8 @@ The full technical write-up is split into focused documents under [`docs/`](./do
 | [`docs/ci_cd.md`](./docs/ci_cd.md)                   | GitHub Actions, Databricks Asset Bundles, deploy plan |
 | [`docs/runbook.md`](./docs/runbook.md)               | Step-by-step run, debugging, reprocessing |
 
+> **Two execution paths.** The medallion logic ships as both a Workflow-based job (the canonical path) and a Delta Live Tables pipeline (`pipelines/dlt/`). See **[DLT Pipeline (Alternative Execution Path)](#dlt-pipeline-alternative-execution-path)** below.
+
 ---
 
 ## Architecture
@@ -428,6 +430,61 @@ The architectural shape — medallion, event-first, decoupled producer — stays
 | CI/CD           | GitHub Actions (lint + tests) | + Databricks Asset Bundles ([`databricks.yml`](./databricks.yml)) |
 | PII             | None (synthetic)              | Tokenisation + UC column masks                      |
 | ML              | Notebook training             | Feature Store + MLflow + Model Serving              |
+
+---
+
+## DLT Pipeline (Alternative Execution Path)
+
+The same Bronze → Silver → Gold logic is also packaged as a **Delta Live Tables** pipeline under [`pipelines/dlt/`](./pipelines/dlt/) (`bronze.py`, `silver.py`, `gold.py`). The DLT pipeline is **additive** — the existing notebook-based Workflow is unchanged and remains the canonical path.
+
+```
+┌─────────────────────────┐        ┌─────────────────────────┐
+│ Workflow `medallion`    │        │ DLT pipeline `ecom-dlt` │
+│  notebooks/00 … 99      │        │  pipelines/dlt/*.py     │
+│  imperative PySpark     │        │  declarative @dlt.table │
+│  Auto Loader + MERGE    │        │  Auto Loader + DLT-     │
+│  manual checkpoints     │        │  managed checkpoints    │
+└────────────┬────────────┘        └────────────┬────────────┘
+             │                                  │
+             ▼                                  ▼
+   `${var.catalog}.ecom_{bronze,silver,gold}`   `${var.catalog}.${var.dlt_schema}`
+```
+
+### Job vs. DLT — when to use which
+
+| Concern             | Workflow job                            | DLT pipeline                                       |
+|---------------------|-----------------------------------------|----------------------------------------------------|
+| Compute model       | Notebook tasks on a shared cluster      | DLT-managed pipeline cluster                       |
+| Checkpoints         | Hand-managed under `_checkpoints/`      | Owned by the DLT runtime                           |
+| Idempotency         | Delta `MERGE` + `overwrite` in `src/`   | Built-in: full materialised-view rebuild           |
+| Quality gates       | `99_quality_checks` (`Expectation`)     | `@dlt.expect` / `@dlt.expect_or_fail` per table   |
+| Lineage             | Implicit (notebook order)               | Explicit DAG in the DLT UI                         |
+| Observability       | Workflow run page + cell output         | DLT event log + per-expectation drop counters     |
+| Schema evolution    | `cloudFiles.schemaEvolutionMode=rescue` | Same, plus DLT-tracked schema versions             |
+| Cost on Free Edition| Lower — reuses the shared cluster       | Higher — dedicated DLT compute                     |
+| Best for…           | Small / cost-sensitive / Free Edition   | Production scale, strict SLAs, declarative ops     |
+
+**Tradeoffs in one sentence:** the Workflow job is cheaper and simpler on Free Edition; DLT is more declarative and observable but spins its own cluster. Use the job for daily operation here, and use DLT to demonstrate (or migrate to) a fully-managed pipeline runtime.
+
+The DLT path writes to a separate schema (`${var.dlt_schema}`, default `ecom_dlt`) so it never contends on the same Delta tables as the job.
+
+### Deploying
+
+```bash
+# Full bundle: job + DLT pipeline
+databricks bundle deploy --target dev
+
+# DLT pipeline only — leaves the Workflow job untouched in the workspace
+databricks bundle deploy --target dev_dlt_only
+
+# Run each path
+databricks bundle run --target dev medallion             # Workflow job
+databricks bundle run --target dev ecom_dlt_pipeline     # DLT pipeline
+```
+
+> **Compute model.** This project runs on **Databricks Free Edition** with **managed (serverless-style) compute**. `databricks.yml` does **not** declare any `job_clusters`, `new_cluster`, `node_type_id`, or worker configuration — the workspace provisions compute implicitly for both the Workflow job and the DLT pipeline. CD runs **both** paths back-to-back (`bundle run … medallion` then `bundle run … ecom_dlt_pipeline`) and a post-run step queries `fact_daily_sales` in each Gold schema to confirm rows landed; if either pipeline fails, the workflow fails.
+
+See [`docs/ci_cd.md`](./docs/ci_cd.md) for target / partial-deploy details and [`docs/runbook.md`](./docs/runbook.md) for first-run + debugging.
 
 ---
 

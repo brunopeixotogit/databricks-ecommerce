@@ -1,13 +1,23 @@
 # Databricks Asset Bundle definition.
 #
-# Declares the Workflow that runs the medallion DAG end-to-end. Same
-# artefacts deploy to dev / prod by switching `--target`. Per-environment
-# differences live under `targets:` (catalog name, host).
+# Declares two execution paths over the same medallion logic:
+#   * the existing Workflow-based job (`medallion`) — notebook DAG,
+#     scheduled, finite `availableNow` runs;
+#   * a Delta Live Tables pipeline (`ecom_dlt_pipeline`) — declarative,
+#     DLT-managed lineage / expectations / checkpointing.
+#
+# Both deploy from the same `dev` / `prod` targets. A third target,
+# `dev_dlt_only`, exists for partial deploys: only the DLT pipeline is
+# pushed, the Workflow job is skipped. The two paths are independent —
+# they write to different schemas (the DLT pipeline targets
+# `${var.dlt_schema}`) so they never contend on the same Delta table.
 #
 # Usage:
-#   databricks bundle validate                    # syntax check
-#   databricks bundle deploy --target dev         # promote to dev workspace
+#   databricks bundle validate                         # syntax check
+#   databricks bundle deploy --target dev              # job + DLT
+#   databricks bundle deploy --target dev_dlt_only     # DLT only
 #   databricks bundle run     --target dev medallion
+#   databricks bundle run     --target dev ecom_dlt_pipeline
 #
 # The CI side runs in .github/workflows/ci.yml; the deploy side is
 # wired up once the workspace + token secrets are configured. See
@@ -24,88 +34,37 @@ variables:
   silver_schema: { default: ecom_silver }
   gold_schema:   { default: ecom_gold }
   volume:        { default: landing }
+  dlt_schema:
+    description: Single schema where the DLT pipeline publishes all bronze/silver/gold tables.
+    default: ecom_dlt
 
 resources:
-  jobs:
-    medallion:
-      name: ecom-medallion
-      max_concurrent_runs: 1
-      tasks:
-        - task_key: setup
-          notebook_task:
-            notebook_path: notebooks/00_setup.py
-            base_parameters:
-              catalog:       ${var.catalog}
-              bronze_schema: ${var.bronze_schema}
-              silver_schema: ${var.silver_schema}
-              gold_schema:   ${var.gold_schema}
-              volume_name:   ${var.volume}
-
-        - task_key: create_tables
-          depends_on: [{ task_key: setup }]
-          notebook_task:
-            notebook_path: notebooks/01_create_tables.py
-            base_parameters:
-              catalog:       ${var.catalog}
-              bronze_schema: ${var.bronze_schema}
-
-        - task_key: simulate
-          depends_on: [{ task_key: create_tables }]
-          notebook_task:
-            notebook_path: notebooks/10_run_simulator.py
-            base_parameters:
-              catalog: ${var.catalog}
-              schema:  ${var.bronze_schema}
-              volume:  ${var.volume}
-              mode:    burst
-              n_sessions: "5000"
-
-        - task_key: bronze
-          depends_on: [{ task_key: simulate }]
-          notebook_task:
-            notebook_path: notebooks/20_bronze.py
-            base_parameters:
-              catalog:       ${var.catalog}
-              bronze_schema: ${var.bronze_schema}
-              volume:        ${var.volume}
-              trigger:       availableNow
-
-        - task_key: silver
-          depends_on: [{ task_key: bronze }]
-          notebook_task:
-            notebook_path: notebooks/30_silver.py
-            base_parameters:
-              catalog:             ${var.catalog}
-              bronze_schema:       ${var.bronze_schema}
-              silver_schema:       ${var.silver_schema}
-              inactivity_minutes:  "30"
-
-        - task_key: gold
-          depends_on: [{ task_key: silver }]
-          notebook_task:
-            notebook_path: notebooks/40_gold.py
-            base_parameters:
-              catalog:       ${var.catalog}
-              silver_schema: ${var.silver_schema}
-              gold_schema:   ${var.gold_schema}
-
-        - task_key: quality
-          depends_on: [{ task_key: gold }]
-          notebook_task:
-            notebook_path: notebooks/99_quality_checks.py
-            base_parameters:
-              catalog:       ${var.catalog}
-              silver_schema: ${var.silver_schema}
-              gold_schema:   ${var.gold_schema}
-
-      schedule:
-        # Hourly off-peak; uses availableNow trigger so each run is finite.
-        quartz_cron_expression: "0 0 * * * ?"
-        timezone_id: UTC
-        pause_status: PAUSED   # flip to UNPAUSED post-deploy
-
-      email_notifications:
-        on_failure: []   # populate with on-call alias when promoted
+  # ---------------------------------------------------------------------
+  # Delta Live Tables pipeline — alternative execution path.
+  # Declared at bundle root so it deploys to every target by default,
+  # including the partial-deploy `dev_dlt_only` target.
+  # ---------------------------------------------------------------------
+  pipelines:
+    ecom_dlt_pipeline:
+      name: ecom-dlt
+      catalog: ${var.catalog}
+      target: ${var.dlt_schema}
+      libraries:
+        - file: { path: ./pipelines/dlt/bronze.py }
+        - file: { path: ./pipelines/dlt/silver.py }
+        - file: { path: ./pipelines/dlt/gold.py }
+      configuration:
+        ecom.catalog:        ${var.catalog}
+        ecom.bronze_schema:  ${var.bronze_schema}
+        ecom.silver_schema:  ${var.silver_schema}
+        ecom.gold_schema:    ${var.gold_schema}
+        ecom.volume:         ${var.volume}
+        ecom.inactivity_minutes: "30"
+      # Free Edition: no cluster / job_clusters / new_cluster declared.
+      # The DLT pipeline runs on Databricks-managed (serverless-style)
+      # compute provisioned by the runtime; cluster sizing is implicit.
+      development: true
+      continuous: false
 
 targets:
   dev:
@@ -116,6 +75,103 @@ targets:
     workspace:
       # host populated via DATABRICKS_HOST env var in CI
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    resources:
+      jobs:
+        # ---------------------------------------------------------------
+        # Workflow-based medallion job — definition is anchored so the
+        # `prod` target reuses it byte-for-byte. The `dev_dlt_only`
+        # target intentionally does not reference the anchor, so the
+        # job is not deployed in that target.
+        # ---------------------------------------------------------------
+        medallion: &medallion_job
+          name: ecom-medallion
+          max_concurrent_runs: 1
+          tasks:
+            - task_key: setup
+              notebook_task:
+                notebook_path: notebooks/00_setup.py
+                base_parameters:
+                  catalog:       ${var.catalog}
+                  bronze_schema: ${var.bronze_schema}
+                  silver_schema: ${var.silver_schema}
+                  gold_schema:   ${var.gold_schema}
+                  volume_name:   ${var.volume}
+
+            - task_key: create_tables
+              depends_on: [{ task_key: setup }]
+              notebook_task:
+                notebook_path: notebooks/01_create_tables.py
+                base_parameters:
+                  catalog:       ${var.catalog}
+                  bronze_schema: ${var.bronze_schema}
+
+            - task_key: simulate
+              depends_on: [{ task_key: create_tables }]
+              notebook_task:
+                notebook_path: notebooks/10_run_simulator.py
+                base_parameters:
+                  catalog: ${var.catalog}
+                  schema:  ${var.bronze_schema}
+                  volume:  ${var.volume}
+                  mode:    burst
+                  n_sessions: "5000"
+
+            - task_key: bronze
+              depends_on: [{ task_key: simulate }]
+              notebook_task:
+                notebook_path: notebooks/20_bronze.py
+                base_parameters:
+                  catalog:       ${var.catalog}
+                  bronze_schema: ${var.bronze_schema}
+                  volume:        ${var.volume}
+                  trigger:       availableNow
+
+            - task_key: silver
+              depends_on: [{ task_key: bronze }]
+              notebook_task:
+                notebook_path: notebooks/30_silver.py
+                base_parameters:
+                  catalog:             ${var.catalog}
+                  bronze_schema:       ${var.bronze_schema}
+                  silver_schema:       ${var.silver_schema}
+                  inactivity_minutes:  "30"
+
+            - task_key: gold
+              depends_on: [{ task_key: silver }]
+              notebook_task:
+                notebook_path: notebooks/40_gold.py
+                base_parameters:
+                  catalog:       ${var.catalog}
+                  silver_schema: ${var.silver_schema}
+                  gold_schema:   ${var.gold_schema}
+
+            - task_key: quality
+              depends_on: [{ task_key: gold }]
+              notebook_task:
+                notebook_path: notebooks/99_quality_checks.py
+                base_parameters:
+                  catalog:       ${var.catalog}
+                  silver_schema: ${var.silver_schema}
+                  gold_schema:   ${var.gold_schema}
+
+          schedule:
+            # Hourly off-peak; uses availableNow trigger so each run is finite.
+            quartz_cron_expression: "0 0 * * * ?"
+            timezone_id: UTC
+            pause_status: PAUSED   # flip to UNPAUSED post-deploy
+
+          email_notifications:
+            on_failure: []   # populate with on-call alias when promoted
+
+  # Partial-deploy target: DLT pipeline only, no Workflow job.
+  # Useful for iterating on DLT logic without touching the existing
+  # job, or for environments where only the DLT path is wanted.
+  dev_dlt_only:
+    mode: development
+    variables:
+      catalog: dev_main
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
 
   prod:
     mode: production
@@ -125,3 +181,9 @@ targets:
       root_path: /Shared/.bundle/${bundle.name}/${bundle.target}
     run_as:
       service_principal_name: ${workspace.current_user.userName}
+    resources:
+      pipelines:
+        ecom_dlt_pipeline:
+          development: false
+      jobs:
+        medallion: *medallion_job
