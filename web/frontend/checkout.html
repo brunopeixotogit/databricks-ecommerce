@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Checkout — Tindal</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link href="./css/styles.css" rel="stylesheet" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="container d-flex align-items-center justify-content-between">
+      <a href="./index.html" class="brand-mark">tindal<span class="brand-dot">.</span></a>
+      <nav class="d-flex gap-3 align-items-center">
+        <a href="./cart.html">Cart <span id="cart-count" class="cart-badge d-none">0</span></a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container py-4">
+    <h1 class="h3 mb-3">Checkout</h1>
+    <div id="checkout-empty" class="banner banner-muted d-none">
+      Your cart is empty. <a href="./index.html">Browse products</a>.
+    </div>
+    <div id="checkout-content" class="row g-4">
+      <div class="col-12 col-md-7">
+        <div class="summary-card">
+          <h2 class="h6 text-uppercase text-secondary">Shipping</h2>
+          <div class="row g-3 mt-1">
+            <div class="col-12 col-md-6">
+              <label class="form-label">Full name</label>
+              <input id="name" class="form-control" placeholder="Demo Buyer" value="Demo Buyer" />
+            </div>
+            <div class="col-12 col-md-6">
+              <label class="form-label">Email</label>
+              <input id="email" class="form-control" placeholder="demo@example.com" value="demo@example.com" />
+            </div>
+            <div class="col-12 col-md-6">
+              <label class="form-label">Country</label>
+              <select id="country" class="form-select">
+                <option value="US" selected>United States</option>
+                <option value="BR">Brazil</option>
+                <option value="UK">United Kingdom</option>
+                <option value="CA">Canada</option>
+                <option value="DE">Germany</option>
+              </select>
+            </div>
+            <div class="col-12 col-md-6">
+              <label class="form-label">Payment method</label>
+              <select id="payment" class="form-select">
+                <option value="credit_card" selected>Credit card</option>
+                <option value="debit_card">Debit card</option>
+                <option value="pix">PIX</option>
+                <option value="boleto">Boleto</option>
+              </select>
+            </div>
+          </div>
+          <small class="text-secondary d-block mt-3">
+            No payment is processed; this form just feeds metadata into the
+            <code>purchase</code> event (<code>payment_method</code>, <code>country</code>).
+          </small>
+        </div>
+      </div>
+      <div class="col-12 col-md-5">
+        <div class="summary-card">
+          <h2 class="h6 text-uppercase text-secondary">Order summary</h2>
+          <div id="order-list" class="mt-2 mb-2"></div>
+          <div class="d-flex justify-content-between"><span>Subtotal</span><span id="subtotal">$0.00</span></div>
+          <div class="d-flex justify-content-between"><span>Tax (8%)</span><span id="tax">$0.00</span></div>
+          <div class="d-flex justify-content-between"><span>Shipping</span><span id="shipping">$0.00</span></div>
+          <hr />
+          <div class="d-flex justify-content-between"><strong>Total</strong><strong id="total">$0.00</strong></div>
+          <button id="place-order" class="btn btn-primary-teal w-100 mt-3">Place order</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="thank-you" class="banner banner-success d-none">
+      <strong>Order confirmed.</strong>
+      Order id: <code id="thank-order-id"></code> &mdash; one <code>purchase</code> event per
+      line item was sent to the lakehouse.
+      <div class="mt-2"><a href="./index.html">Browse more</a></div>
+    </div>
+  </main>
+
+  <footer>
+    Tindal · synthetic store powered by the lakehouse demo.
+  </footer>
+
+  <script src="./js/catalog.js"></script>
+  <script src="./js/tracker.js"></script>
+  <script src="./js/app.js"></script>
+  <script>
+    (function () {
+      function render() {
+        const cart = Tracker.getCart();
+        const empty = document.getElementById("checkout-empty");
+        const content = document.getElementById("checkout-content");
+        if (!cart || cart.items.length === 0) {
+          empty.classList.remove("d-none");
+          content.classList.add("d-none");
+          return;
+        }
+        empty.classList.add("d-none");
+        content.classList.remove("d-none");
+
+        const list = document.getElementById("order-list");
+        list.innerHTML = "";
+        let subtotal = 0;
+        cart.items.forEach((it) => {
+          const product = window.findProduct(it.product_id) || { name: it.product_id };
+          subtotal += it.price * it.qty;
+          const row = document.createElement("div");
+          row.className = "d-flex justify-content-between py-1";
+          row.innerHTML = `<span>${product.name} × ${it.qty}</span>
+                           <span>$${(it.price * it.qty).toFixed(2)}</span>`;
+          list.appendChild(row);
+        });
+        const tax = subtotal * 0.08;
+        const shipping = subtotal > 75 ? 0 : 9.99;
+        const total = subtotal + tax + shipping;
+        document.getElementById("subtotal").textContent = "$" + subtotal.toFixed(2);
+        document.getElementById("tax").textContent = "$" + tax.toFixed(2);
+        document.getElementById("shipping").textContent = "$" + shipping.toFixed(2);
+        document.getElementById("total").textContent = "$" + total.toFixed(2);
+      }
+
+      document.getElementById("place-order").addEventListener("click", () => {
+        const country = document.getElementById("country").value;
+        const paymentMethod = document.getElementById("payment").value;
+        const orderId = Tracker.purchase({ paymentMethod, country });
+        if (!orderId) return;
+        document.getElementById("thank-order-id").textContent = orderId;
+        document.getElementById("checkout-content").classList.add("d-none");
+        document.getElementById("thank-you").classList.remove("d-none");
+        window.App.refreshCartBadge();
+      });
+
+      render();
+      window.App.refreshCartBadge();
+    })();
+  </script>
+</body>
+</html>

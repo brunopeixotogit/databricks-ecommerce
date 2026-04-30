@@ -1,0 +1,184 @@
+/*
+ * Color palette — intentionally not Amazon (orange/blue) and not Magalu
+ * (cobalt/pink). A teal primary on a cream background, with deep slate
+ * text. Borrowed only the layout idea from those sites, not the look.
+ */
+:root {
+  --color-primary:        #0d6e6e;   /* deep teal */
+  --color-primary-soft:   #e3f1ef;
+  --color-primary-dark:   #0a5454;
+  --color-accent:         #d97706;   /* burnt amber, used very sparingly */
+  --color-bg:             #faf6ec;   /* warm cream */
+  --color-surface:        #ffffff;
+  --color-text:           #1f2933;
+  --color-text-muted:     #6b7280;
+  --color-border:         #e5e0d2;
+  --color-success:        #15803d;
+  --shadow-card:          0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px rgba(15, 23, 42, 0.06);
+  --radius:               14px;
+}
+
+html, body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* --- Top bar --- */
+.topbar {
+  background: var(--color-primary);
+  color: var(--color-surface);
+  padding: 0.85rem 0;
+}
+.topbar a, .topbar a:hover {
+  color: var(--color-surface);
+  text-decoration: none;
+}
+.brand-mark {
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  font-size: 1.25rem;
+}
+.brand-dot {
+  color: var(--color-accent);
+}
+
+/* --- Category pills --- */
+.category-bar {
+  background: var(--color-primary-soft);
+  border-bottom: 1px solid var(--color-border);
+  padding: 0.5rem 0;
+}
+.category-pill {
+  display: inline-block;
+  padding: 0.25rem 0.85rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  margin-right: 0.4rem;
+  color: var(--color-primary-dark);
+  cursor: pointer;
+  user-select: none;
+  border: 1px solid transparent;
+}
+.category-pill:hover, .category-pill.active {
+  background: var(--color-surface);
+  border-color: var(--color-primary);
+}
+
+/* --- Product grid --- */
+.product-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.product-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 6px rgba(15, 23, 42, 0.06), 0 12px 24px rgba(15, 23, 42, 0.10);
+}
+.product-thumb {
+  background: linear-gradient(135deg, var(--color-primary-soft) 0%, #fff 100%);
+  height: 160px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2.5rem;
+  color: var(--color-primary);
+}
+.product-body {
+  padding: 1rem 1.1rem 1.2rem;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.product-title {
+  font-weight: 600;
+  font-size: 0.98rem;
+  line-height: 1.3;
+  margin-bottom: 0.4rem;
+}
+.product-cat {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-text-muted);
+  margin-bottom: 0.6rem;
+}
+.product-price {
+  font-weight: 700;
+  font-size: 1.15rem;
+  color: var(--color-primary-dark);
+  margin-top: auto;
+}
+
+/* --- Buttons --- */
+.btn-primary-teal {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: var(--color-surface);
+}
+.btn-primary-teal:hover {
+  background: var(--color-primary-dark);
+  border-color: var(--color-primary-dark);
+  color: var(--color-surface);
+}
+.btn-outline-teal {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: transparent;
+}
+.btn-outline-teal:hover {
+  background: var(--color-primary);
+  color: var(--color-surface);
+}
+
+/* --- Cart badge --- */
+.cart-badge {
+  background: var(--color-accent);
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.78rem;
+  margin-left: 0.4rem;
+  font-weight: 700;
+}
+
+/* --- Cart / checkout layout --- */
+.cart-row {
+  border-bottom: 1px solid var(--color-border);
+  padding: 0.75rem 0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.cart-row:last-child { border-bottom: 0; }
+.summary-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  box-shadow: var(--shadow-card);
+}
+
+/* --- Status banners --- */
+.banner {
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  margin: 1.25rem 0;
+  font-size: 0.95rem;
+}
+.banner-info { background: var(--color-primary-soft); color: var(--color-primary-dark); }
+.banner-success { background: #dcfce7; color: var(--color-success); }
+.banner-muted { background: #f3f4f6; color: var(--color-text-muted); }
+
+footer {
+  margin-top: 4rem;
+  padding: 2rem 0 3rem;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  text-align: center;
+}
