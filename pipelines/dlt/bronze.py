@@ -11,6 +11,13 @@ DLT pipeline resource in ``databricks.yml``.
 """
 from __future__ import annotations
 
+# DLT does not add the bundle root to PYTHONPATH automatically. Append
+# the project root (two levels up from pipelines/dlt/) so ``src.*``
+# imports resolve at pipeline-update time.
+import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+
 import dlt
 from pyspark.sql import functions as F
 
