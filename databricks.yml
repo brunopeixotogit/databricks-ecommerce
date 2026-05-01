@@ -38,6 +38,27 @@ variables:
     description: Single schema where the DLT pipeline publishes all bronze/silver/gold tables.
     default: ecom_dlt
 
+  # -------------------------------------------------------------------
+  # Orchestration mode for `ecom_orchestrator` (see resources.jobs).
+  #
+  #   prod      — run only the DLT pipeline. NO synthetic data is
+  #               produced. This is the safe default and the only mode
+  #               that should ever run in production.
+  #   simulator — run only the simulator notebook. NO downstream
+  #               processing happens; useful for backfilling test data.
+  #   full      — simulator first, then the DLT pipeline. Convenient
+  #               for end-to-end demos and integration tests.
+  #
+  # Override per-run with:
+  #     databricks bundle run --target dev ecom_orchestrator --var=mode=full
+  # -------------------------------------------------------------------
+  mode:
+    description: "Execution mode for ecom_orchestrator: prod | simulator | full."
+    default: prod
+  n_events:
+    description: "Number of synthetic events the simulator emits per run (modes: simulator, full)."
+    default: "5000"
+
 resources:
   # ---------------------------------------------------------------------
   # Delta Live Tables pipeline — alternative execution path.
@@ -68,6 +89,70 @@ resources:
       serverless: true
       development: true
       continuous: false
+
+  # ---------------------------------------------------------------------
+  # Orchestrator job — controlled by the `mode` variable / job parameter.
+  # Single entry point that decouples event generation from processing:
+  #
+  #   mode=prod      → simulator skipped, DLT pipeline runs
+  #   mode=simulator → simulator runs, DLT skipped
+  #   mode=full      → simulator runs first, DLT runs after (ALL_DONE)
+  #
+  # The two `condition_task` gates evaluate the `mode` job parameter and
+  # short-circuit downstream tasks via `outcome: "true" | "false"` deps.
+  # This is the canonical Databricks pattern for parameter-gated DAGs.
+  # ---------------------------------------------------------------------
+  jobs:
+    ecom_orchestrator:
+      name: "ecom-orchestrator"
+      max_concurrent_runs: 1
+      parameters:
+        - name: mode
+          default: ${var.mode}
+        - name: n_events
+          default: ${var.n_events}
+      tasks:
+        - task_key: gate_simulator
+          # Resolves true when mode != "prod" (i.e. simulator OR full).
+          condition_task:
+            op: NOT_EQUAL
+            left: "{{job.parameters.mode}}"
+            right: "prod"
+
+        - task_key: gate_dlt
+          # Resolves true when mode != "simulator" (i.e. prod OR full).
+          condition_task:
+            op: NOT_EQUAL
+            left: "{{job.parameters.mode}}"
+            right: "simulator"
+
+        - task_key: simulator
+          depends_on:
+            - task_key: gate_simulator
+              outcome: "true"
+          notebook_task:
+            notebook_path: notebooks/11_simulate.py
+            base_parameters:
+              catalog:  ${var.catalog}
+              schema:   ${var.bronze_schema}
+              volume:   ${var.volume}
+              n_events: "{{job.parameters.n_events}}"
+              dt:       ""        # empty = today (UTC)
+              source:   "simulator"
+
+        - task_key: dlt_pipeline
+          depends_on:
+            - task_key: gate_dlt
+              outcome: "true"
+            - task_key: simulator   # ordering only; ALL_DONE handles skip
+          # ALL_DONE so dlt_pipeline runs in `prod` mode (where simulator
+          # is excluded) and in `full` mode (where simulator succeeded).
+          run_if: ALL_DONE
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.ecom_dlt_pipeline.id}
+
+      email_notifications:
+        on_failure: []   # populate with on-call alias when promoted
 
 targets:
   dev:

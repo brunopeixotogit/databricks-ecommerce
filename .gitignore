@@ -76,3 +76,6 @@ secrets/
 
 # --- Local-only learning notes (PT-BR study guide; never tracked) --------
 docs_ptbr/
+
+# --- Web app dry-run output -----------------------------------------------
+web/dryrun_events/

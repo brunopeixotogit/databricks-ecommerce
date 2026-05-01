@@ -129,7 +129,7 @@
         order_id: null,
         payment_method: null,
         discount_code: null,
-        properties: { source: "web_ui" },
+        properties: { source: "web" },
         schema_version: SCHEMA_VERSION,
       },
       fields || {}

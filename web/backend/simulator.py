@@ -95,7 +95,7 @@ def _make_event(
         order_id=order_id,
         payment_method=payment_method,
         discount_code=None,
-        properties={"source": "server_simulator"},
+        properties={"source": "web"},
     )
 
 
