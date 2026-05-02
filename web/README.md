@@ -81,7 +81,7 @@ cp web/config/.env.example web/config/.env
 uvicorn web.backend.app:app --reload --env-file web/config/.env
 ```
 
-Open http://localhost:8000/ → Tindal store. Click around, add to cart, check out. Every action posts to `/events/batch`, which uploads NDJSON files to the volume.
+Open http://localhost:8000/ → BricksShop store. Click around, add to cart, check out. Every action posts to `/events/batch`, which uploads NDJSON files to the volume.
 
 > **Tip — start in dry-run.** Set `DATABRICKS_DRYRUN=true` first; events land in `./dryrun_events/dt=YYYY-MM-DD/*.ndjson` so you can verify the payload shape locally before pointing at a real workspace.
 

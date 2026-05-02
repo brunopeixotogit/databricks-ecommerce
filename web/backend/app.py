@@ -38,7 +38,7 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(name)s — %(message)s",
 )
-logger = logging.getLogger("ecom.web")
+logger = logging.getLogger("bricksshop.web")
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
@@ -62,8 +62,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="ecom-web",
-    description="E-commerce simulation feeding events into Databricks.",
+    title="BricksShop API",
+    description="BricksShop e-commerce simulation feeding events into Databricks.",
     version="0.1.0",
     lifespan=lifespan,
 )
