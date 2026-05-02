@@ -148,7 +148,7 @@ databricks bundle deploy --target dev_dlt_only
 databricks bundle run    --target dev_dlt_only ecom_dlt_pipeline
 ```
 
-In the workspace UI: **Pipelines → ecom-dlt → Start**. The DLT event log is at **Pipelines → ecom-dlt → Event log** (the per-expectation drop counts surface there too).
+In the workspace UI: **Pipelines → bricksshop-dlt → Start**. The DLT event log is at **Pipelines → bricksshop-dlt → Event log** (the per-expectation drop counts surface there too).
 
 ### What gets created
 
@@ -181,6 +181,33 @@ databricks bundle destroy --target dev_dlt_only
 ```
 
 Or drop the schema directly: `DROP SCHEMA IF EXISTS ${catalog}.${dlt_schema} CASCADE;`. The Workflow job's tables in `ecom_bronze` / `ecom_silver` / `ecom_gold` are unaffected.
+
+---
+
+## 1.3 · Orchestrator job — `bricksshop-orchestrator`
+
+The bundle ships a third resource — `ecom_orchestrator` (workspace display name `bricksshop-orchestrator`) — that **decouples** event generation from data processing under a single mode-controlled job.
+
+| `mode` | Simulator notebook | DLT pipeline | Typical use |
+|---|---|---|---|
+| `prod` (default) | excluded | runs | Process existing landing data; never produce synthetic events |
+| `simulator` | runs (`n_events`) | excluded | Backfill test data without disturbing any consumer |
+| `full` | runs first | runs after | End-to-end demo or integration test |
+
+```bash
+# Production mode (default — safe to run repeatedly)
+databricks bundle run --target dev ecom_orchestrator
+
+# Just generate test data
+databricks bundle run --target dev ecom_orchestrator --var=mode=simulator --var=n_events=2000
+
+# Full demo: simulator + DLT in one click
+databricks bundle run --target dev ecom_orchestrator --var=mode=full
+```
+
+Override the run-level parameters without redeploying: `--params mode=simulator --params n_events=2000`. The simulator notebook (`notebooks/11_simulate.py`) writes one NDJSON file per run to `/Volumes/<catalog>/ecom_bronze/landing/events/dt=YYYY-MM-DD/`, identical in shape to web-app events; downstream Bronze and Silver cannot tell them apart except via `properties.source = "simulator" | "web"`.
+
+Internally the job uses two `condition_task` gates against `{{job.parameters.mode}}` to short-circuit the simulator or DLT branch as needed. Full design rationale in [`ci_cd.md`](./ci_cd.md) §8.9.
 
 ---
 
@@ -438,7 +465,7 @@ Then re-run `01_create_tables` and `20_bronze`. **This re-ingests every file in 
 ## 7 · Operational checklists
 
 ### Daily
-- Workflow run finished green (Workflows → ecom-medallion → last run).
+- Workflow run finished green (Workflows → bricksshop-medallion → last run).
 - `99_quality_checks` ran with no `fail`-severity violations.
 - Bronze `_rescued_data` count stable (alert on growth).
 

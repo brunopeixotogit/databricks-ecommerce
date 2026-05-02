@@ -376,6 +376,29 @@ The DLT pipeline (`ecom_dlt_pipeline`) is declared at the bundle root, so it dep
 
 CD's `on.push.paths` filter (§8.2) covers `src/**`, `notebooks/**`, `pipelines/**`, `databricks.yml`, `conf/**`, `.github/workflows/**`. Edits to any DLT module under `pipelines/dlt/` therefore trigger CD on their own.
 
+### 8.9 Orchestrator job — `mode`-controlled simulator + DLT
+
+A third bundle resource — `ecom_orchestrator` — is the canonical entry point for **manual runs**. Unlike `medallion` (which couples a simulator step into the DAG) or the bare `ecom_dlt_pipeline` (which has no producer of its own), the orchestrator decouples the two cleanly via a `mode` parameter:
+
+| `mode` | Simulator notebook (`notebooks/11_simulate.py`) | DLT pipeline | Typical use |
+|---|---|---|---|
+| `prod` (default) | excluded | runs | Production processing of whatever's already in the landing zone |
+| `simulator` | runs | excluded | Backfill test data without triggering processing |
+| `full` | runs first | runs after (`run_if: ALL_DONE`) | End-to-end demo or integration test |
+
+```bash
+databricks bundle run --target dev ecom_orchestrator                       # prod default
+databricks bundle run --target dev ecom_orchestrator --var=mode=simulator
+databricks bundle run --target dev ecom_orchestrator --var=mode=full --var=n_events=10000
+```
+
+Internally, two `condition_task` gates evaluate `{{job.parameters.mode}}`:
+
+- `gate_simulator`: `NOT_EQUAL "prod"` → runs simulator when its outcome is `"true"`
+- `gate_dlt`: `NOT_EQUAL "simulator"` → runs DLT when its outcome is `"true"`
+
+Bundle variable `mode` defaults to `prod`, so deploying without overrides yields a production-safe job: every run processes existing data only. CD does **not** invoke the orchestrator — it continues to call `ecom_dlt_pipeline` directly. The orchestrator exists for human-driven backfills, demos, and integration tests.
+
 ---
 
 ## 9 · Pipeline orchestration (within Databricks)

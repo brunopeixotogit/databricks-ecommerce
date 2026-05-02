@@ -1,4 +1,4 @@
-# Documentation index
+# BricksShop — Documentation index
 
 | Doc | Read this for |
 |---|---|
@@ -8,12 +8,14 @@
 | [`gold_layer.md`](./gold_layer.md)         | Marts, KPIs, BI readiness, query examples |
 | [`data_model.md`](./data_model.md)         | Pinned schemas, ER relationships, modelling decisions |
 | [`data_quality.md`](./data_quality.md)     | Expectation framework, severity levels, failure handling |
-| [`ci_cd.md`](./ci_cd.md)                   | GitHub Actions, test strategy, Databricks Asset Bundles, deploy plan |
-| [`dlt_pipeline.md`](./dlt_pipeline.md)     | End-to-end DLT pipeline: code structure, execution model, deployment |
+| [`ci_cd.md`](./ci_cd.md)                   | GitHub Actions, deploy targets, **orchestrator modes (`prod`/`simulator`/`full`)** |
+| [`dlt_pipeline.md`](./dlt_pipeline.md)     | DLT pipeline: code structure, execution model, deployment |
 | [`runbook.md`](./runbook.md)               | Step-by-step run, debugging guide, reprocessing strategy |
 
-Top-level entry points:
+Companion entry points:
 
-- [`../README.md`](../README.md) — portfolio-facing project overview.
-- [`../databricks.yml`](../databricks.yml) — Asset Bundle declaring the Workflow.
+- [`../README.md`](../README.md) — project overview, mode-controlled execution, PT-BR appendix.
+- [`../web/README.md`](../web/README.md) — BricksShop web app: API, schema parity with `EVENT_SCHEMA`, end-to-end test plan.
+- [`../databricks.yml`](../databricks.yml) — Asset Bundle (variables, resources, three deploy targets).
 - [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) — CI pipeline.
+- [`../.github/workflows/cd.yml`](../.github/workflows/cd.yml) — CD pipeline (DLT-only path-filtered runs).

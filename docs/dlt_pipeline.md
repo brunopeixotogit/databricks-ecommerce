@@ -1,6 +1,6 @@
 # DLT Pipeline — End-to-end
 
-Operational and architectural reference for the **Delta Live Tables** pipeline (`ecom_dlt_pipeline`, exposed in the workspace as `ecom-dlt`). This is the path CD auto-runs on every push to `main`.
+Operational and architectural reference for the **Delta Live Tables** pipeline (`ecom_dlt_pipeline`, exposed in the workspace as `bricksshop-dlt`). This is the path CD auto-runs on every push to `main`.
 
 > Companion docs: [`architecture.md`](./architecture.md) (system shape), [`runbook.md`](./runbook.md) §1.2 (operations), [`data_quality.md`](./data_quality.md) §7 (expectation parity), [`ci_cd.md`](./ci_cd.md) §8.6–8.8 (deploy / target wiring).
 
@@ -181,7 +181,7 @@ A DLT update is one synchronous run of the pipeline. The DLT runtime:
 4. Evaluates expectations as rows flow through. `@dlt.expect_or_fail` violations abort the update and roll back the offending table version; downstream tables in the same update are skipped.
 5. Tears down compute on completion.
 
-Each update writes a new Delta version per table; `DESCRIBE HISTORY` works as on any other Delta table. Updates can be triggered by `bundle run`, the workspace UI (**Pipelines → ecom-dlt → Start**), or any DLT scheduling mechanism.
+Each update writes a new Delta version per table; `DESCRIBE HISTORY` works as on any other Delta table. Updates can be triggered by `bundle run`, the workspace UI (**Pipelines → bricksshop-dlt → Start**), or any DLT scheduling mechanism.
 
 ### 4.2 How it differs from the Workflow `medallion` job
 

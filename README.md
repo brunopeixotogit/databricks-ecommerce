@@ -1,8 +1,8 @@
-# E-commerce Data Platform on Databricks
+# BricksShop — Lakehouse Data Platform on Databricks
 
-A production-style **lakehouse pipeline** that simulates an e-commerce site (electronics, appliances, furniture), ingests clickstream and snapshot data through **Auto Loader**, and refines it across a **Bronze → Silver → Gold** medallion architecture on **Delta Lake** — ending in four analytics-ready marts: daily sales, conversion funnel, abandoned carts, and a per-user 360.
+A production-style **lakehouse** that simulates an e-commerce site (electronics, appliances, furniture), captures behavioural events from **two independent producers** (a real web application and a synthetic simulator), and refines the data through a **Bronze → Silver → Gold** medallion on **Delta Lake** — ending in four analytics-ready marts: daily sales, conversion funnel, abandoned carts, and a per-user 360.
 
-> Designed and tuned to run end-to-end on **Databricks Free Edition**, with a deliberately substrate-agnostic design: replacing the synthetic producer with Kafka or Kinesis only changes the ingestion connector — every downstream module stays identical.
+> Designed and tuned to run end-to-end on **Databricks Free Edition** with managed / serverless compute. Replacing the synthetic producer with Kafka or Kinesis only changes the ingestion connector — every downstream module stays identical.
 
 ![Stack](https://img.shields.io/badge/Databricks-Free%20Edition-FF3621?logo=databricks&logoColor=white)
 ![Delta Lake](https://img.shields.io/badge/Delta%20Lake-3.x-00ADD8?logo=delta&logoColor=white)
@@ -16,58 +16,53 @@ A production-style **lakehouse pipeline** that simulates an e-commerce site (ele
 
 Data-engineering portfolios tend to stop at "I can read a CSV with Spark." This one shows the moving parts of a real lakehouse:
 
-- a **synthetic-but-realistic producer** with a session state machine, weighted devices, and tunable funnel probabilities;
-- a **streaming ingestion layer** with pinned schemas, rescued-data handling, and durable checkpoints;
-- **idempotent transforms** — Delta `MERGE` for events, attribute-hash SCD2 for dimensions, business-rule order rollups;
-- **query-tuned Gold marts** with `OPTIMIZE` / `ZORDER BY`, partitioned for predicate pushdown;
-- **operational hygiene** — config + env overrides, quality expectations, unit tests, Workflow-friendly triggers.
-
-The full technical write-up is split into focused documents under [`docs/`](./docs/README.md):
-
-| Doc | Read this for |
-|---|---|
-| [`docs/architecture.md`](./docs/architecture.md)     | End-to-end design, data flow, principles, tradeoffs |
-| [`docs/bronze_layer.md`](./docs/bronze_layer.md)     | Auto Loader, schema enforcement, append-only contract |
-| [`docs/silver_layer.md`](./docs/silver_layer.md)     | Dedup, sessionisation, SCD2 by attribute hash |
-| [`docs/gold_layer.md`](./docs/gold_layer.md)         | Marts, KPIs, BI readiness |
-| [`docs/data_model.md`](./docs/data_model.md)         | Pinned schemas, ER relationships |
-| [`docs/data_quality.md`](./docs/data_quality.md)     | Expectation framework, severity, failure handling |
-| [`docs/ci_cd.md`](./docs/ci_cd.md)                   | GitHub Actions, Databricks Asset Bundles, deploy plan |
-| [`docs/dlt_pipeline.md`](./docs/dlt_pipeline.md)     | End-to-end DLT pipeline: code structure, execution model, deployment |
-| [`docs/runbook.md`](./docs/runbook.md)               | Step-by-step run, debugging, reprocessing |
-
-> **Two execution paths.** The medallion logic ships as a notebook-based **Workflow job** (`medallion`) **and** a self-contained **Delta Live Tables pipeline** (`pipelines/dlt/`). CD auto-runs the DLT pipeline; the Workflow job is deployed and triggered manually. See **[DLT Pipeline (Alternative Execution Path)](#dlt-pipeline-alternative-execution-path)** below.
+- **Decoupled producers** — a web application that emits real user events and a notebook simulator that emits synthetic test data; both write to the same landing zone with the same schema, distinguished only by a `properties.source` tag.
+- **Two interchangeable processing paths** — a notebook-based Workflow job (`medallion`) and a declarative Delta Live Tables pipeline (`ecom_dlt_pipeline`). Same logic, different ergonomic profiles.
+- **Mode-controlled orchestration** — a single bundle job (`ecom_orchestrator`) runs simulator-only, processing-only (default), or both end-to-end based on a `mode` parameter. Production runs never generate synthetic data.
+- **Pinned schemas, idempotent transforms, attribute-hash SCD2, query-tuned Gold marts, runtime quality gates** — the textbook patterns implemented end-to-end and validated against a live workspace.
 
 ---
 
-## Architecture
+## Architecture overview
+
+Two independent producers, one landing zone, two interchangeable processing paths.
 
 ```
-                    ┌──────────────────────────┐
-                    │      Simulator           │
-                    │  (Python · faker · RNG)  │
-                    └────────────┬─────────────┘
-                                 │  gzipped JSON, partitioned by dt=YYYY-MM-DD
-                                 ▼
-   /Volumes/main/ecom_bronze/landing/{events, users, products}/
-                                 │
-                                 │  Auto Loader  (cloudFiles · schemaEvolutionMode=rescue)
-                                 ▼
-   ┌──────────────── BRONZE ────────────────┐    append-only · partition by _ingest_date
-   │ events_raw     users_raw    products_raw│
-   └────────────────────┬───────────────────┘
-                        │  PySpark · Delta MERGE · Window functions
-                        ▼
-   ┌──────────────── SILVER ────────────────┐    dedup · sessionize · SCD2
-   │ events     dim_users_scd2              │
-   │ fact_orders  dim_products_scd2         │
-   └────────────────────┬───────────────────┘
-                        │  groupBy / agg / explode · OPTIMIZE ZORDER
-                        ▼
-   ┌──────────────── GOLD ──────────────────┐    BI / CRM / ML feature ready
-   │ fact_daily_sales      fact_funnel      │
-   │ fact_abandoned_carts  dim_user_360     │
-   └────────────────────────────────────────┘
+   ┌────────────────────────┐        ┌────────────────────────┐
+   │   Web app (FastAPI)    │        │   Simulator notebook    │
+   │   web/  → real users   │        │   notebooks/11_simulate │
+   │   properties.source    │        │   properties.source     │
+   │     = "web"            │        │     = "simulator"       │
+   └───────────┬────────────┘        └────────────┬────────────┘
+               │                                  │
+               │  NDJSON, Files API / dbutils     │
+               ▼                                  ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │  Landing volume (single source of truth)                 │
+   │  /Volumes/<catalog>/ecom_bronze/landing/events/          │
+   │      └─ dt=YYYY-MM-DD/events_<uuid>.ndjson               │
+   └───────────────────────────┬──────────────────────────────┘
+                               │  Auto Loader (cloudFiles · schemaEvolutionMode=rescue)
+                               ▼
+                ┌──────────────────────────────┐
+                │      Bronze (append-only)    │
+                │  events_raw · users_raw      │
+                │  products_raw                │
+                └──────────────┬───────────────┘
+                               │  PySpark · Delta MERGE · Window functions
+                               ▼
+                ┌──────────────────────────────┐
+                │   Silver (cleansed + SCD2)   │
+                │  events · dim_users_scd2     │
+                │  fact_orders · dim_products  │
+                └──────────────┬───────────────┘
+                               │  groupBy / agg / explode · OPTIMIZE ZORDER
+                               ▼
+                ┌──────────────────────────────┐
+                │       Gold (BI marts)        │
+                │  fact_daily_sales · funnel   │
+                │  abandoned_carts · user_360  │
+                └──────────────────────────────┘
 ```
 
 **Layer contracts**
@@ -78,426 +73,255 @@ The full technical write-up is split into focused documents under [`docs/`](./do
 | Silver | Cleansed, deduped, conformed, sessionised, SCD2 | Delta `MERGE` on `event_id`; SCD2 by attribute hash |
 | Gold  | Denormalised marts optimised for query speed     | Full `overwrite` (`overwriteSchema=true`) |
 
+The **simulator is fully decoupled** from the processing layer. The DLT pipeline (`pipelines/dlt/`) reads from the landing volume and never invokes the simulator. The simulator is a separate notebook (`notebooks/11_simulate.py`) that you trigger explicitly.
+
 ---
 
-## Highlight features
+## How to run
 
-### Realistic event simulator
-A session state machine — `LANDING → BROWSE → (CART → (CHECKOUT → PURCHASE | ABANDON)| EXIT)` — with weighted device mix (62 % mobile / 30 % desktop / 8 % tablet), Poisson-distributed page views, and per-category price ranges. **Deterministic for the same seed**, so backfills are reproducible.
+### Prerequisites
 
-### Pinned schemas, no `inferSchema`
-Every source has a `StructType` in `src/common/schemas.py` plus a `SCHEMA_VERSION` constant. Unknown fields land in `_rescued_data` instead of breaking the stream. Type drift becomes loud, not silent.
+- Databricks workspace with Unity Catalog (Free Edition works).
+- `databricks` CLI authenticated against the workspace (`databricks auth login`).
+- `databricks bundle deploy --target dev` to deploy the bundle resources (medallion job + DLT pipeline + orchestrator job).
 
-### True idempotency
-- **Silver events** — deduped by `row_number()` over `(event_id ORDER BY _ingest_ts DESC)`, written via Delta `MERGE` on `event_id`.
-- **SCD2 dimensions** — boundaries are detected by hashing only the *tracked* columns (`updated_ts` is intentionally excluded), so re-emitting an unchanged snapshot does not open a spurious new version.
-- **Auto Loader** — durable checkpoints under `_checkpoints/<source>` make re-runs free.
+### Three execution modes
 
-### Sessionisation that survives shuffles
-`session_id_silver = <user_id|anon>_<seq>` is **re-derived** from event-time gaps (`> 30 min`) using `Window` + `lag` + cumulative `sum`. The producer's `session_id` is preserved as `session_id_raw` for debugging — but the canonical key works correctly even when events arrive out of order across shards.
+The bundle exposes a single orchestrator job parameterised by a `mode` variable. Default is `prod` — production runs never generate synthetic data.
 
-### Cost-aware streaming
-Default trigger is `availableNow`: process new files and exit. On Free Edition this prevents a stream from holding the cluster 24/7. A single env/widget flip switches to continuous (`processingTime=30 seconds`).
-
-### Config-driven, environment-portable
-All catalog / schema / volume / trigger / ZORDER targets live in `conf/pipeline.yml`. Override any leaf with an env var:
 ```bash
-export ECOM_PIPELINE_CATALOG=dev_main          # routes the whole pipeline to a dev catalog
-export ECOM_SIMULATOR_USERS_INITIAL_POPULATION=100   # tiny smoke run
+# Production (DLT only) — the safe default
+databricks bundle run --target dev ecom_orchestrator --var=mode=prod
+
+# Simulator only — generates test data, no processing
+databricks bundle run --target dev ecom_orchestrator --var=mode=simulator
+
+# Full pipeline — simulator first, then DLT
+databricks bundle run --target dev ecom_orchestrator --var=mode=full
 ```
 
-### Notebooks are thin shells
-Every notebook is `widgets + imports + module call`. Real logic lives in `src/`, where it is unit-testable without a cluster.
+| Mode | Simulator runs? | DLT pipeline runs? | When to use |
+|---|---|---|---|
+| `prod` (default) | ❌ excluded | ✅ runs | Production processing of whatever's already in the landing zone |
+| `simulator` | ✅ runs | ❌ excluded | Backfill test data without triggering processing |
+| `full` | ✅ runs first | ✅ runs after | End-to-end demo or integration test |
+
+Override the event volume too: `--var=mode=full --var=n_events=10000`. Or skip the deploy and pass run-level parameters directly: `--params mode=full --params n_events=10000`.
+
+### CI/CD entry point
+
+Every push to `main` that touches `src/`, `notebooks/`, `pipelines/`, `databricks.yml`, `conf/`, or `.github/workflows/` triggers `.github/workflows/cd.yml`. CD does **not** run the simulator — only `ecom_dlt_pipeline` is auto-executed, and a post-run query (`SELECT * LIMIT 10` from `dev_main.ecom_dlt.fact_daily_sales`) is the success gate. Docs-only commits skip CD entirely.
+
+For the full CI/CD design — workflow files, path filters, deploy targets, secrets — see [`docs/ci_cd.md`](./docs/ci_cd.md).
 
 ---
 
-## Tech stack
+## Simulation
 
-- **Databricks** — Unity Catalog, Volumes, Workflows.
-- **Delta Lake** — ACID, time travel, `MERGE`, `OPTIMIZE`/`ZORDER BY`, schema evolution.
-- **PySpark** — DataFrame API; `Window` for dedup / sessionise / SCD2; Delta Python bindings for `MERGE`.
-- **Auto Loader (`cloudFiles`)** — incremental file discovery, schema location, rescue mode.
-- **Faker · PyYAML · pytest · chispa**.
+The simulator generates a session-state-machine stream of synthetic events that conform exactly to the Bronze schema, so the same `events_raw` / `events` / `fact_orders` machinery ingests it without distinction from real traffic.
+
+```
+LANDING → BROWSE → (CART → (CHECKOUT → PURCHASE | ABANDON) | EXIT)
+```
+
+Mix is realistic: 62 % mobile / 30 % desktop / 8 % tablet, Poisson-distributed page views, per-category price ranges, tunable funnel probabilities (`conf/simulator.yml`). **Deterministic for the same seed**, so backfills are reproducible.
+
+### How to run the simulator
+
+| From | How |
+|---|---|
+| **Bundle (mode=simulator)** | `databricks bundle run --target dev ecom_orchestrator --var=mode=simulator --var=n_events=5000` |
+| **Notebook directly** | Open `notebooks/11_simulate.py` in the workspace, set widgets (`n_events`, `dt`), run all cells. |
+| **Python (offline)** | `from src.simulator.api import generate_events; generate_events(n_events=5000, landing_root="/tmp/landing")` — used by tests. |
+
+### Where data lands
+
+```
+/Volumes/<catalog>/ecom_bronze/landing/events/
+    └─ dt=YYYY-MM-DD/
+        └─ events_<run_uuid>.ndjson
+```
+
+Each call to `generate_events()` writes **one NDJSON file** containing exactly `n_events` events. `event_id` values are fresh UUID4s per row, and a `properties.run_id` value tags every event in the same file with a shared run identifier — re-running with identical parameters never produces a colliding `event_id`, so Silver's `MERGE` on `event_id` stays idempotent.
+
+### Controlling volume
+
+| Lever | Where | Default |
+|---|---|---|
+| `n_events` | bundle var / notebook widget / function arg | `5000` |
+| `dt` (target partition) | bundle / widget / arg, `"YYYY-MM-DD"` | today (UTC) |
+| Funnel probabilities, device mix, anonymous-session rate | `conf/simulator.yml` | tuned |
+| Catalog / schema / volume | bundle vars (`catalog`, `bronze_schema`, `volume`) | `dev_main` / `ecom_bronze` / `landing` |
+
+---
+
+## Web application
+
+A small full-stack app under [`web/`](./web/README.md) — FastAPI backend + vanilla-JS storefront — that emits real user events into the same landing volume.
+
+- Click around the storefront → `tracker.js` fires `page_view` / `add_to_cart` / `purchase` / `abandon_cart` events
+- Browser batches and POSTs to `/events/batch`
+- Backend uploads each batch as one NDJSON file to `/Volumes/<catalog>/ecom_bronze/landing/events/dt=YYYY-MM-DD/events_<uuid>.ndjson`
+- Auto Loader / DLT pick it up on the next trigger — no different from any other event source
+
+Every web event carries `properties.source = "web"`. Combined with the simulator's `properties.source = "simulator"`, you can split producers in any analytics query:
+
+```sql
+SELECT properties['source'] AS producer,
+       event_type,
+       COUNT(*) AS rows
+FROM   dev_main.ecom_silver.events
+WHERE  event_date = current_date()
+GROUP  BY 1, 2
+ORDER  BY 3 DESC;
+```
+
+Run the web app locally (single `uvicorn` process serves API + frontend on `:8000`):
+
+```bash
+pip install -r web/backend/requirements.txt
+cp web/config/.env.example web/config/.env       # fill in DATABRICKS_HOST + DATABRICKS_TOKEN
+uvicorn web.backend.app:app --reload --env-file web/config/.env
+```
+
+Full operational guide in [`web/README.md`](./web/README.md).
+
+---
+
+## Data model
+
+| Layer | Table | Grain | What lives here |
+|---|---|---|---|
+| Bronze | `events_raw` | one row per ingested event | append-only, partitioned by `_ingest_date`, schema-pinned |
+| Bronze | `users_raw`, `products_raw` | one row per snapshot | source-faithful entity captures |
+| Silver | `events` | one row per `event_id` | deduped, sessionised (`session_id_silver`), partitioned by `event_date` |
+| Silver | `dim_users_scd2`, `dim_products_scd2` | one row per attribute change | SCD2 with `valid_from / valid_to / is_current / version`; boundaries detected by hashing tracked columns only (`updated_ts` deliberately excluded so noisy snapshots don't open spurious versions) |
+| Silver | `fact_orders` | one row per `order_id` | purchase-event rollup; `items` as `ARRAY<STRUCT<…>>`; `subtotal / tax (8%) / shipping (free over $75) / total` |
+| Gold | `fact_daily_sales` | day × category × country | GMV / orders / units / AOV |
+| Gold | `fact_funnel` | day | view / cart / purchase / abandon rates |
+| Gold | `fact_abandoned_carts` | session | remarketing candidates with cart value |
+| Gold | `dim_user_360` | user (current SCD2 only) | recency / orders / LTV / RFM segment |
+
+Schemas are pinned in `src/common/schemas.py` (Workflow path) and a lockstep mirror at `pipelines/dlt/schemas.py` (DLT path — the runtime cannot import `src/`). Bumping `SCHEMA_VERSION` is a coordinated breaking change documented in [`docs/data_model.md`](./docs/data_model.md).
 
 ---
 
 ## Repository layout
 
 ```
-databricks_ecommerce/
+bricksshop/
 ├── conf/                       # pipeline + simulator config (env-overridable)
-├── notebooks/                  # 00_setup → 10_simulator → 20_bronze → 30_silver → 40_gold → 99_quality
+├── notebooks/
+│   ├── 00_setup.py             # catalogs, schemas, landing volume
+│   ├── 01_create_tables.py     # explicit Bronze DDL
+│   ├── 10_run_simulator.py     # legacy simulator (used by `medallion` job)
+│   ├── 11_simulate.py          # NEW — decoupled simulator (used by `ecom_orchestrator`)
+│   ├── 20_bronze.py            # Auto Loader streams (Workflow path)
+│   ├── 30_silver.py            # dedup + sessionise + SCD2 + fact_orders
+│   ├── 40_gold.py              # 4 marts + OPTIMIZE / ZORDER
+│   └── 99_quality_checks.py    # quality gate
+├── pipelines/dlt/              # DLT pipeline (declarative, serverless)
+│   ├── schemas.py              # lockstep mirror of src/common/schemas.py
+│   ├── bronze.py               # streaming tables via Auto Loader
+│   ├── silver.py               # materialised views + @dlt.expect[_or_fail]
+│   └── gold.py                 # 4 marts as materialised views
 ├── src/
 │   ├── common/                 # TableRef, IO helpers, schemas, config loader, quality
-│   ├── simulator/              # entity & behavior generators, JSON emitter
-│   ├── bronze/                 # Auto Loader streams (events + snapshots)
+│   ├── simulator/
+│   │   ├── api.py              # NEW — generate_events(n_events, date) public API
+│   │   ├── behavior.py         # session FSM
+│   │   ├── entities.py         # users + products generators
+│   │   ├── emit.py             # legacy file writer (gzipped JSON)
+│   │   └── run.py              # legacy orchestration (used by 10_run_simulator)
+│   ├── bronze/                 # Auto Loader streams (Workflow path)
 │   ├── silver/                 # dedup + sessionise, SCD2, fact_orders
 │   └── gold/                   # daily_sales, funnel, abandoned_carts, user_360
 ├── tests/                      # pytest + chispa unit tests
-├── documentation.md            # full technical write-up
-├── requirements.txt
-└── README.md
+├── web/                        # BricksShop storefront + FastAPI backend
+│   ├── backend/                # /event /events/batch /simulate /health
+│   ├── frontend/               # HTML + Bootstrap + vanilla JS
+│   ├── config/                 # .env template
+│   └── README.md
+├── docs/                       # English documentation
+├── databricks.yml              # Asset Bundle (variables, resources, targets)
+└── README.md                   # you are here
 ```
 
 ---
 
-## Quick start
+## Documentation index
 
-### On Databricks
-1. **Import** this repo via *Workspace → Repos → Add Repo*.
-2. Run `notebooks/00_setup.py` (creates the catalog if missing, schemas, and the `landing` Volume with its subdirectories).
-3. Run `notebooks/10_run_simulator.py` (installs `faker`, restarts Python, emits users + products + events).
-4. Run the medallion in order: `20_bronze.py` → `30_silver.py` → `40_gold.py`.
-5. Run `notebooks/99_quality_checks.py` to validate the layer.
-6. *(Optional)* Wire the six notebooks into a **Databricks Workflow** for continuous operation.
+Concise documentation in [`docs/`](./docs/README.md):
 
-All catalog / schema / volume names are widget parameters, so the same code runs in dev and prod with no edits.
-
-### Locally (tests only)
-```bash
-pip install -r requirements.txt
-pytest tests/
-```
-The simulator and quality helpers are pure Python — most logic can be tested without a Databricks cluster.
-
----
-
-## CI/CD pipeline (current state)
-
-Two GitHub Actions workflows protect and promote `main`. Both are **active and run automatically**.
-
-### CI runs on every PR and push to `main`
-
-`.github/workflows/ci.yml`:
-
-- **Ruff linting** on `src/` and `tests/`
-- **Unit tests** with `pytest --cov=src` on a matrix of **Python 3.10 / 3.11 / 3.12**
-- **Import-graph smoke** — every pure-Python module under `src/` must import without PySpark
-- **Config validation** — every `conf/*.yml` is loaded through `src.common.config.load_config`
-- **Secret scanning** — Gitleaks across the full git history (advisory)
-
-### CD runs on push to `main` — **only when pipeline-relevant paths change**
-
-`.github/workflows/cd.yml`:
-
-- Installs the Databricks CLI (`databricks/setup-cli@main`)
-- `databricks bundle validate --target dev`
-- `databricks bundle deploy --target dev` (uploads notebooks + DLT pipeline, updates Job definition)
-- `databricks bundle run --target dev ecom_dlt_pipeline` (runs the DLT pipeline on serverless compute)
-- post-run sanity: `SELECT * LIMIT 10` from `dev_main.ecom_dlt.fact_daily_sales`
-
-The medallion Workflow job is deployed but **not auto-run** — trigger it manually with `databricks bundle run --target dev medallion`.
-
-**Path filter on the `push` trigger.** CD evaluates whether at least one of the following paths changed in the commit; if not, the workflow is skipped and **no Databricks compute is consumed**:
-
-```
-src/**
-notebooks/**
-pipelines/**
-databricks.yml
-conf/**
-.github/workflows/**
-```
-
-A docs-only commit (`README.md`, `docs/**`, any `*.md`) merges to `main`, runs CI for code-health verification, and **does not** trigger a Databricks deploy or job run. `workflow_dispatch` (manual runs) has no path filter — the **Run workflow** button always reruns CD.
-
-### End-to-end flow
-
-```
-git push origin main
-        │
-        ▼
-┌──────────────── CI (ci.yml) ────────────────┐
-│  ruff · pytest matrix · import smoke ·       │
-│  conf validation · gitleaks                  │
-└──────────────────────┬───────────────────────┘
-                       │ green
-                       ▼
-┌──────────────── CD (cd.yml) ────────────────┐
-│  bundle validate → deploy → run DLT pipeline │
-│  → post-run sample query                     │
-└──────────────────────┬───────────────────────┘
-                       │
-                       ▼
-┌────────── Databricks DLT update ────────────┐
-│  bronze (events_raw, users_raw, products_raw)│
-│  → silver (events, dims, fact_orders)        │
-│  → gold   (4 marts)                          │
-└──────────────────────┬───────────────────────┘
-                       │
-                       ▼
-       DLT Gold tables refreshed in
-        dev_main.ecom_dlt
-        (fact_daily_sales, fact_funnel,
-         fact_abandoned_carts, dim_user_360)
-```
-
-### Current architecture state
-
-Three independent layers, all live and consistent with the code:
-
-| Layer | What's running | Where it's defined |
-|---|---|---|
-| **Data pipeline (Bronze → Silver → Gold)** | Two execution paths over the same medallion logic. **Workflow `medallion`** — 7-task DAG: `00_setup` → `01_create_tables` → `10_run_simulator` → `20_bronze` → `30_silver` → `40_gold` → `99_quality_checks`. **DLT `ecom_dlt_pipeline`** — declarative `@dlt.table` pipeline on serverless compute. Both idempotent end-to-end. | `notebooks/`, `src/{bronze,silver,gold,common}/`, `pipelines/dlt/` |
-| **Orchestration — Databricks Asset Bundle** | Three targets (`dev`, `dev_dlt_only`, `prod`). The Workflow schedule is **PAUSED** by design; the medallion job is triggered manually. The DLT pipeline is auto-run by CD on every push to `main`. | `databricks.yml` |
-| **CI/CD — GitHub Actions** | `ci.yml` (lint + matrix tests + config validation + secrets scan) on every PR/push; `cd.yml` (bundle validate → deploy → run **DLT pipeline** → post-run sample query) on push to `main`, **path-filtered to pipeline-relevant changes**. | `.github/workflows/` |
-
-Coverage scope is intentionally limited to pure-Python modules (`fail_under = 60 %`, currently 79 %). PySpark-bound modules are exercised by Databricks at deploy time, not by the default CI lane.
-
-### Deployment rules
-
-The single source of truth for "when does anything run":
-
-| Event | CI runs? | CD runs? | Databricks deploy? |
-|---|---|---|---|
-| PR opened / updated against `main` | ✅ | ❌ | ❌ |
-| Push to `main` touching `src/**`, `notebooks/**`, `pipelines/**`, `databricks.yml`, `conf/**`, or `.github/workflows/**` | ✅ | ✅ | ✅ |
-| Push to `main` touching **only** `*.md` / `docs/**` / other non-pipeline files | ✅ | ❌ skipped by path filter | ❌ |
-| Manual **Run workflow** on `cd.yml` (workflow_dispatch) | n/a | ✅ always | ✅ |
-| Push to a non-`main` branch | ❌ | ❌ | ❌ |
-| Tag push (`v*.*.*`) — prod release | ❌ | ❌ (prod CD intentionally not wired yet) | ❌ |
-
-**What prevents unnecessary executions:**
-- Docs-only commits are skipped at the workflow level via `on.push.paths` in `cd.yml` — no runner spins up, no Databricks compute is consumed.
-- `concurrency.group: cd-dev` with `cancel-in-progress: false` serialises deploys without killing them mid-flight.
-- The Workflow schedule in `databricks.yml` is **PAUSED** — the medallion job runs only when a human triggers it (`databricks bundle run --target dev medallion`), never on a hidden cron and never automatically by CD.
-- Quality gates run in **both paths**: `99_quality_checks` is the final task of the Workflow (a `fail` predicate aborts the run); the DLT pipeline encodes the same predicates as `@dlt.expect_or_fail` decorators (a violation fails the DLT update). Stale data never gets blessed as "deployed."
-
-### Required GitHub Secrets
-
-Configured in **Repo → Settings → Environments → `dev`** (scoped, audited):
-
-| Secret | What it is |
+| Doc | Read this for |
 |---|---|
-| `DATABRICKS_HOST_DEV`  | dev workspace URL (e.g. `https://dbc-xxx.cloud.databricks.com`) |
-| `DATABRICKS_TOKEN_DEV` | OAuth M2M token for a service principal scoped to dev |
-
-The deploy uses the bundle's `dev` target (`catalog: dev_main`); the `prod` target is never touched by automation.
-
-> Production deploys are intentionally **tag-gated and not yet wired** — see [`docs/ci_cd.md § 8.4`](./docs/ci_cd.md). Dev CD is the canonical promotion path today.
-
----
-
-## Testing strategy
-
-Three layers of tests, each catching a different class of failure.
-
-### 1 · CI tests (code level)
-
-Run by `.github/workflows/ci.yml` on every PR and push.
-
-| Check | Tool | Catches |
-|---|---|---|
-| Linting          | Ruff (`E`, `F`, `I`, `B`, `UP`, `SIM`) | Style drift, dead imports, deprecated typing forms |
-| Unit tests       | pytest 8 + coverage (≥ 60 %)           | Behavioural regressions in pure-Python logic |
-| Multi-version    | matrix `3.10 / 3.11 / 3.12`            | Version-specific bugs (PEP 604 unions, dataclass kw-only, typing.Self) |
-| Import-graph     | inline Python script                   | An accidental `from pyspark.sql import …` in a pure-Python module |
-| Config schema    | `load_config("pipeline" / "simulator")` | Malformed YAML; missing keys |
-| Secrets          | Gitleaks                               | Accidentally-committed tokens / `.env` / `*.pem` |
-
-**Concrete failure scenario.** A contributor edits `src/silver/events.py` and breaks the dedup window — say `Window.partitionBy("event_id").orderBy(F.col("_ingest_ts").desc())` becomes `.orderBy("_ingest_ts")` (ascending). Their PR runs through CI:
-
-1. Ruff passes (style is fine).
-2. The pure-Python tests pass (Silver isn't directly tested with a real DataFrame in this lane).
-3. **Import-graph smoke** still passes — but if they accidentally added `from pyspark.sql import …` to a pure-Python module to debug, **all three matrix cells fail**.
-4. After merge, **CD runs Silver against the dev workspace**, and `99_quality_checks` raises — see § 2 below.
-
-### 2 · Data quality tests (pipeline level)
-
-Run inside Databricks by `notebooks/99_quality_checks.py`. Every expectation is a SQL predicate that must evaluate `TRUE` for a valid row. `severity="fail"` violations raise `AssertionError` and abort the Workflow run.
-
-| Validation target | Predicate | Why it exists |
-|---|---|---|
-| `event_id` integrity | `event_id IS NOT NULL` (fail) | Dedup keys on `event_id`; null = uniqueness cannot be guaranteed |
-| Event-type domain | `event_type IN ('page_view','add_to_cart','purchase','abandon_cart')` (fail) | Producer drift would break every downstream transformation |
-| Sessionisation invariant | `session_id_silver IS NOT NULL` (fail) | Funnel and abandoned-cart marts depend on it |
-| Purchase wholeness | `event_type <> 'purchase' OR order_id IS NOT NULL` (fail) | A purchase without `order_id` is silently lost in `fact_orders` groupby |
-| Price sanity | `price IS NULL OR price >= 0` (warn) | Surfaces upstream bugs without blocking |
-| Order totals | `total >= 0`, `subtotal >= 0`, `size(items) > 0` (fail) | `fact_daily_sales` would be wrong if violated |
-| Total math | `abs(total - (subtotal + tax + shipping)) < 0.05` (warn) | Detects drift between Silver math and any future rule change |
-
-The full framework is documented in [`docs/data_quality.md`](./docs/data_quality.md).
-
-### 3 · SQL validation tests (real queries)
-
-These can be run by hand against the dev workspace after any deploy, or wired into `99_quality_checks` for permanent monitoring.
-
-#### Bronze ↔ Silver consistency
-```sql
-SELECT COUNT(*) AS bronze_rows FROM dev_main.ecom_bronze.events_raw;
-SELECT COUNT(*) AS silver_rows FROM dev_main.ecom_silver.events;
-```
-Silver should be **≤ Bronze** (filter + dedup) but typically within ~5 %. A larger gap signals dedup or filtering misbehaviour.
-
-#### Event-type integrity
-```sql
-SELECT event_type, COUNT(*) AS rows
-FROM   dev_main.ecom_silver.events
-GROUP  BY event_type
-ORDER  BY rows DESC;
-```
-Expect exactly four rows: `page_view`, `add_to_cart`, `purchase`, `abandon_cart`. Anything else means producer drift slipped through Bronze rescue mode.
-
-#### Deduplication (no `event_id` may appear twice in Silver)
-```sql
-SELECT event_id, COUNT(*) AS dup_count
-FROM   dev_main.ecom_silver.events
-GROUP  BY event_id
-HAVING COUNT(*) > 1;
-```
-Should return **zero rows**. A row here means the `MERGE` on `event_id` failed or the dedup window changed.
-
-#### SCD2 correctness (each user has exactly one `is_current = true` row)
-```sql
-SELECT user_id, COUNT(*) AS current_versions
-FROM   dev_main.ecom_silver.dim_users_scd2
-WHERE  is_current = true
-GROUP  BY user_id
-HAVING COUNT(*) > 1;
-```
-Should return **zero rows**. More than one current version means the hash-boundary detection broke or `valid_to` filling regressed.
-
-#### Fact-orders integrity
-```sql
-SELECT COUNT(*)             AS orders,
-       ROUND(SUM(total), 2) AS total_gmv_with_tax_shipping,
-       ROUND(SUM(subtotal + tax + shipping), 2) AS recomputed_total
-FROM   dev_main.ecom_silver.fact_orders;
-```
-`total_gmv_with_tax_shipping` should equal `recomputed_total` to within rounding (< $0.01 per order). Drift means the tax/shipping rule changed without updating the column.
-
-#### Bronze → Gold reconciliation
-```sql
-SELECT (SELECT SUM(item.line_total)
-        FROM dev_main.ecom_silver.fact_orders LATERAL VIEW EXPLODE(items) AS item)  AS silver_gmv,
-       (SELECT SUM(gmv) FROM dev_main.ecom_gold.fact_daily_sales)                    AS gold_gmv;
-```
-Two values should match exactly. Mismatch means Gold is reading stale Silver or vice versa.
-
-### 4 · Why each test layer exists
-
-| Layer | Production failure simulated |
-|---|---|
-| **CI tests** | Refactor breaks behaviour; a typo in a typing import; secrets committed by mistake. Catches the **developer-side** failure modes before any data ever moves. |
-| **Data quality tests** | Producer drift; Kafka at-least-once duplication; late-arriving events; partial replays of Bronze. Catches **runtime** failures invisible to lint or unit tests. |
-| **SQL validation tests** | Silent join misalignment; a Silver job whose `MERGE` keys flipped; SCD2 boundaries that opened spurious versions; Gold reading from stale Silver. These mimic the post-mortem queries you'd run after a "why is yesterday's GMV different from today's?" alert. |
-
-Each layer is independent. CI never reaches the data; quality gates never inspect the code. Both must pass, and the SQL queries are the post-deploy sanity that keeps Gold honest.
-
----
-
-## What gets produced
-
-Final tables under `main.ecom_gold`:
-
-| Table | Grain | Powers |
-|---|---|---|
-| `fact_daily_sales`     | day × category × country | Sales / GMV / AOV dashboards |
-| `fact_funnel`          | day                      | View → cart → purchase rates |
-| `fact_abandoned_carts` | session                  | Email & ad remarketing campaigns |
-| `dim_user_360`         | user                     | RFM segmentation; ML feature base |
-
-Each is denormalised, partitioned where it makes sense, and Z-ordered on the columns the BI layer actually filters on.
-
----
-
-## Design decisions worth highlighting
-
-1. **Decoupled producer.** Auto Loader does not know the data is synthetic — swapping for Kafka changes ~50 lines.
-2. **Append-only Bronze.** Silver and Gold are always rebuildable. Bronze is the replay log.
-3. **`MERGE` for facts, `overwrite` for marts.** Silver `events` is large enough that incremental MERGE pays off; Gold marts are cheap to rebuild and benefit from clean schema overwrites.
-4. **SCD2 by attribute hash.** Robust to noisy `updated_ts` — only real changes open a new version.
-5. **`availableNow` over continuous.** Right-sized for Free Edition; one flag to flip in production.
-6. **Centralised IO helpers.** `TableRef.fqn`, `volume_path()`, `upsert/overwrite/optimize` — renaming a schema is a one-line change.
-
----
-
-## Lessons from real failures
-
-The pipeline was hardened against three failures hit during development — all documented with root cause and fix in [`docs/runbook.md`](./docs/runbook.md):
-
-- `Catalog 'main' does not exist` — added `CREATE CATALOG IF NOT EXISTS` to `00_setup.py`.
-- `ModuleNotFoundError: No module named 'faker'` — added `%pip install faker` + `dbutils.library.restartPython()` to `10_run_simulator.py`.
-- `[DELTA_ZORDERING_ON_PARTITION_COLUMN] sale_date` — replaced ZORDER columns with non-partition predicates (`category`, `country`).
+| [`docs/architecture.md`](./docs/architecture.md)     | End-to-end design, data flow, principles, tradeoffs |
+| [`docs/dlt_pipeline.md`](./docs/dlt_pipeline.md)     | DLT pipeline: code structure, execution model, deployment |
+| [`docs/bronze_layer.md`](./docs/bronze_layer.md)     | Auto Loader, schema enforcement, append-only contract |
+| [`docs/silver_layer.md`](./docs/silver_layer.md)     | Dedup, sessionisation, SCD2 by attribute hash |
+| [`docs/gold_layer.md`](./docs/gold_layer.md)         | Marts, KPIs, BI readiness |
+| [`docs/data_model.md`](./docs/data_model.md)         | Pinned schemas, ER relationships |
+| [`docs/data_quality.md`](./docs/data_quality.md)     | Expectation framework, severity, failure handling |
+| [`docs/ci_cd.md`](./docs/ci_cd.md)                   | GitHub Actions, deploy targets, mode wiring |
+| [`docs/runbook.md`](./docs/runbook.md)               | Step-by-step run, debugging, reprocessing |
+| [`web/README.md`](./web/README.md)                   | Web app: API reference, schema parity, end-to-end test plan |
 
 ---
 
 ## Scaling to production
 
-The architectural shape — medallion, event-first, decoupled producer — stays identical. Only the substrate changes.
+The architectural shape — medallion, event-first, decoupled producers — stays identical. Only the substrate changes.
 
-| Concern         | This project (Free Edition)   | Production                                          |
-|-----------------|-------------------------------|-----------------------------------------------------|
-| Ingestion       | Auto Loader on a Volume       | Kafka / Kinesis / Event Hubs structured streaming  |
-| Compute         | Single shared cluster         | Per-layer job clusters, Photon, autoscaling, spot   |
-| Orchestration   | Databricks Workflows          | Workflows + Delta Live Tables                       |
-| Governance      | Single UC                     | Full UC — lineage, ABAC, column masks, tagging      |
-| Quality         | `Expectation` helper          | DLT expectations or Great Expectations in CI        |
-| Schema          | `_rescued_data` column        | Confluent / Apicurio Schema Registry                |
-| Performance     | Manual `OPTIMIZE` + Z-ORDER   | Liquid Clustering, Predictive Optimization          |
-| CI/CD           | GitHub Actions (lint + tests) | + Databricks Asset Bundles ([`databricks.yml`](./databricks.yml)) |
-| PII             | None (synthetic)              | Tokenisation + UC column masks                      |
-| ML              | Notebook training             | Feature Store + MLflow + Model Serving              |
-
----
-
-## DLT Pipeline (Alternative Execution Path)
-
-The same Bronze → Silver → Gold logic is also packaged as a **Delta Live Tables** pipeline under [`pipelines/dlt/`](./pipelines/dlt/) (`schemas.py`, `bronze.py`, `silver.py`, `gold.py`). The DLT pipeline is **self-contained** — it does not import from `src/`; the source schemas live at `pipelines/dlt/schemas.py` in lockstep with `src/common/schemas.py`. CD auto-runs this pipeline on every push to `main`; the Workflow job is deployed but triggered manually.
-
-```
-┌─────────────────────────┐        ┌─────────────────────────┐
-│ Workflow `medallion`    │        │ DLT pipeline `ecom-dlt` │
-│  notebooks/00 … 99      │        │  pipelines/dlt/*.py     │
-│  imperative PySpark     │        │  declarative @dlt.table │
-│  Auto Loader + MERGE    │        │  Auto Loader + DLT-     │
-│  manual checkpoints     │        │  managed checkpoints    │
-└────────────┬────────────┘        └────────────┬────────────┘
-             │                                  │
-             ▼                                  ▼
-   `${var.catalog}.ecom_{bronze,silver,gold}`   `${var.catalog}.${var.dlt_schema}`
-```
-
-### Job vs. DLT — when to use which
-
-| Concern             | Workflow job                            | DLT pipeline                                       |
-|---------------------|-----------------------------------------|----------------------------------------------------|
-| Compute model       | Notebook tasks on a shared cluster      | Serverless DLT compute (`serverless: true` — Free Edition requirement) |
-| Checkpoints         | Hand-managed under `_checkpoints/`      | Owned by the DLT runtime                           |
-| Idempotency         | Delta `MERGE` + `overwrite` in `src/`   | Built-in: full materialised-view rebuild           |
-| Quality gates       | `99_quality_checks` (`Expectation`)     | `@dlt.expect` / `@dlt.expect_or_fail` per table   |
-| Lineage             | Implicit (notebook order)               | Explicit DAG in the DLT UI                         |
-| Observability       | Workflow run page + cell output         | DLT event log + per-expectation drop counters     |
-| Schema evolution    | `cloudFiles.schemaEvolutionMode=rescue` | Same, plus DLT-tracked schema versions             |
-| Code reuse          | Imports from `src/` (shared with tests) | Self-contained under `pipelines/dlt/` (DLT runtime cannot import `src/`) |
-| Auto-run by CD      | No — manual `bundle run` only           | ✅ yes, on every push to `main`                    |
-| Best for…           | Backfills / replay / exercising `src/`  | Daily auto-runs · declarative ops · observability  |
-
-**Tradeoffs in one sentence:** the DLT pipeline is the canonical CD-driven path with native lineage and observability; the Workflow job exercises the imperative `src/` codebase end-to-end and is the better fit for backfills or replay.
-
-The DLT path writes to a separate schema (`${var.dlt_schema}`, default `ecom_dlt`) so it never contends on the same Delta tables as the job.
-
-### Deploying
-
-```bash
-# Full bundle: job + DLT pipeline
-databricks bundle deploy --target dev
-
-# DLT pipeline only — leaves the Workflow job untouched in the workspace
-databricks bundle deploy --target dev_dlt_only
-
-# Run each path
-databricks bundle run --target dev medallion             # Workflow job
-databricks bundle run --target dev ecom_dlt_pipeline     # DLT pipeline
-```
-
-> **Compute model.** This project runs on **Databricks Free Edition** with **managed / serverless compute**. `databricks.yml` does **not** declare any `job_clusters`, `new_cluster`, `node_type_id`, or worker configuration. The DLT pipeline runs with `serverless: true` (Free Edition mandates it); the Workflow job reuses the shared cluster. CD auto-runs **only** `ecom_dlt_pipeline` on push to `main`, then queries `dev_main.ecom_dlt.fact_daily_sales` (`SELECT * LIMIT 10`) as a post-run sanity check; if the DLT update fails or the query returns nothing, the workflow fails. The medallion Workflow job is deployed but must be triggered manually via `databricks bundle run --target dev medallion`.
-
-See [`docs/ci_cd.md`](./docs/ci_cd.md) for target / partial-deploy details and [`docs/runbook.md`](./docs/runbook.md) for first-run + debugging.
+| Concern | This project (Free Edition) | Production |
+|---|---|---|
+| Producer | Web app + notebook simulator | Web app + Kafka / Kinesis / Event Hubs |
+| Ingestion | Auto Loader on a Volume | Same Auto Loader against the streaming source |
+| Compute | Shared cluster + serverless DLT | Per-layer job clusters · Photon · spot · serverless DLT |
+| Orchestration | Asset Bundles + `mode` parameter | Same; tag-gated prod CD pipeline |
+| Performance | Manual `OPTIMIZE` + Z-ORDER | Liquid Clustering · Predictive Optimization |
+| Quality | `Expectation` helper + `@dlt.expect_or_fail` | Same + Great Expectations in CI |
+| Schema | `_rescued_data` column | Confluent / Apicurio Schema Registry |
 
 ---
 
 ## Author
 
-**Bruno Peixoto** — building production-grade data platforms on Databricks and Delta Lake.
-For the full step-by-step technical breakdown of every layer, start at [`docs/README.md`](./docs/README.md).
+**Bruno Peixoto** — building production-grade data platforms on Databricks and Delta Lake. For the full step-by-step technical breakdown of every layer, start at [`docs/README.md`](./docs/README.md).
+
+---
+
+## 🇧🇷 Português (BR)
+
+**BricksShop** é uma plataforma estilo lakehouse que simula um e-commerce, captura eventos de comportamento de **dois produtores independentes** (uma aplicação web real e um simulador sintético em notebook), e refina os dados em uma medallion **Bronze → Silver → Gold** sobre **Delta Lake** — terminando em quatro marts prontos para análise: vendas diárias, funil de conversão, carrinhos abandonados e user 360.
+
+### Arquitetura em uma frase
+
+```
+Web app  ─┐
+          ├─►  Volume de landing  ─►  Bronze  ─►  Silver  ─►  Gold
+Simulador─┘
+```
+
+Os dois produtores escrevem **NDJSON** no mesmo Volume Unity Catalog (`/Volumes/<catalog>/ecom_bronze/landing/events/dt=YYYY-MM-DD/`) com o **mesmo schema**. O único diferenciador é `properties.source = "web" | "simulator"`. O DLT pipeline é totalmente independente: lê o Volume e nunca dispara o simulador.
+
+### Modos de execução
+
+O job `ecom_orchestrator` é controlado por uma variável `mode`:
+
+| Modo | O que roda | Para quê |
+|---|---|---|
+| `prod` (default) | Apenas DLT | Produção — nunca gera dados sintéticos |
+| `simulator` | Apenas simulador | Backfill de dados de teste sem disparar processamento |
+| `full` | Simulador + DLT | Demo end-to-end ou teste de integração |
+
+```bash
+databricks bundle run --target dev ecom_orchestrator --var=mode=prod        # default
+databricks bundle run --target dev ecom_orchestrator --var=mode=simulator
+databricks bundle run --target dev ecom_orchestrator --var=mode=full
+```
+
+### Onde aprender mais (PT-BR)
+
+Há um guia de estudo passo a passo, inteiramente em PT-BR, em [`docs_ptbr/00_guia_de_estudo.md`](./docs_ptbr/00_guia_de_estudo.md) (não versionado — material de estudo local). Ele cobre o projeto na ordem real de execução dos dados: **setup → simulator → Bronze → Silver → Gold → quality → Workflow → DLT → CI/CD**, com armadilhas comuns em cada etapa.
+
+A documentação técnica oficial está em inglês sob [`docs/`](./docs/README.md).

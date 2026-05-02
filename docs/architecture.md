@@ -194,7 +194,8 @@ The DLT pipeline is **self-contained**: it does **not** import from `src/`. The 
                 ┌───────────────────┴────────────────────┐
                 ▼                                        ▼
    ┌────────────────────────┐                ┌────────────────────────┐
-   │ Workflow `medallion`   │                │ DLT pipeline `ecom-dlt`│
+   │ Workflow `medallion`   │                │ DLT pipeline           │
+   │                        │                │   `bricksshop-dlt`     │
    │  notebooks/00 … 99     │                │  pipelines/dlt/*.py    │
    │  imperative PySpark    │                │  declarative @dlt.table│
    │  Auto Loader + MERGE   │                │  Auto Loader (DLT-     │
