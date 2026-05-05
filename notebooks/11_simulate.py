@@ -40,6 +40,14 @@ dbutils.widgets.text("volume",   "landing")
 dbutils.widgets.text("n_events", "5000")
 dbutils.widgets.text("dt",       "")     # empty = today (UTC)
 dbutils.widgets.text("source",   "simulator")
+# `mode` is forwarded by the orchestrator job. When the orchestrator
+# is invoked with mode=prod, the simulator must not produce any new
+# events. We achieve this by short-circuiting at the top of this
+# notebook rather than via a Databricks `condition_task` exclusion,
+# because the latter cannot coexist with a `simulator-before-dlt`
+# ordering dependency on `dlt_pipeline` (Databricks Jobs ignores the
+# `outcome` qualifier under `run_if: ALL_DONE` / `NONE_FAILED`).
+dbutils.widgets.text("mode",     "simulator")
 
 CATALOG  = dbutils.widgets.get("catalog")
 SCHEMA   = dbutils.widgets.get("schema")
@@ -47,6 +55,13 @@ VOLUME   = dbutils.widgets.get("volume")
 N_EVENTS = int(dbutils.widgets.get("n_events"))
 DT       = dbutils.widgets.get("dt") or None
 SOURCE   = dbutils.widgets.get("source")
+MODE     = dbutils.widgets.get("mode")
+
+# Production-safety short-circuit. mode=prod means data processing only;
+# this notebook must not generate synthetic events.
+if MODE == "prod":
+    print(f"mode={MODE!r} -> simulator is a no-op in production mode.")
+    dbutils.notebook.exit("skipped: mode=prod")
 
 # COMMAND ----------
 from src.simulator.api import generate_events

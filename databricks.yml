@@ -112,24 +112,22 @@ resources:
         - name: n_events
           default: ${var.n_events}
       tasks:
-        - task_key: gate_simulator
-          # Resolves true when mode != "prod" (i.e. simulator OR full).
-          condition_task:
-            op: NOT_EQUAL
-            left: "{{job.parameters.mode}}"
-            right: "prod"
-
-        - task_key: gate_dlt
-          # Resolves true when mode != "simulator" (i.e. prod OR full).
-          condition_task:
-            op: NOT_EQUAL
-            left: "{{job.parameters.mode}}"
-            right: "simulator"
-
+        # Three-task linear DAG: simulator -> gate_dlt -> dlt_pipeline.
+        #
+        # The simulator notebook always runs but is mode-aware: when
+        # job.parameters.mode == "prod", it short-circuits at the top
+        # and exits as a no-op (no events written). This avoids the
+        # Databricks Jobs limitation where `outcome` matching on a
+        # condition_task is bypassed by `run_if: ALL_DONE / NONE_FAILED`
+        # — the only run_if that honours `outcome:` is ALL_SUCCESS, but
+        # ALL_SUCCESS blocks downstream tasks when an upstream is
+        # EXCLUDED. By keeping the simulator always-run, we can use
+        # ALL_SUCCESS end-to-end and still get correct mode semantics.
+        #
+        # gate_dlt is the only condition_task: its outcome is enforced
+        # by the default ALL_SUCCESS run_if on dlt_pipeline, so DLT is
+        # correctly excluded in `simulator` mode.
         - task_key: simulator
-          depends_on:
-            - task_key: gate_simulator
-              outcome: "true"
           notebook_task:
             notebook_path: notebooks/11_simulate.py
             base_parameters:
@@ -139,15 +137,23 @@ resources:
               n_events: "{{job.parameters.n_events}}"
               dt:       ""        # empty = today (UTC)
               source:   "simulator"
+              mode:     "{{job.parameters.mode}}"   # notebook short-circuits when "prod"
+
+        - task_key: gate_dlt
+          # Resolves true when mode != "simulator" (i.e. prod OR full).
+          depends_on:
+            - task_key: simulator
+          condition_task:
+            op: NOT_EQUAL
+            left: "{{job.parameters.mode}}"
+            right: "simulator"
 
         - task_key: dlt_pipeline
           depends_on:
             - task_key: gate_dlt
-              outcome: "true"
-            - task_key: simulator   # ordering only; ALL_DONE handles skip
-          # ALL_DONE so dlt_pipeline runs in `prod` mode (where simulator
-          # is excluded) and in `full` mode (where simulator succeeded).
-          run_if: ALL_DONE
+              outcome: "true"     # outcome match enforced by ALL_SUCCESS
+          # Default run_if: ALL_SUCCESS — the only mode in which
+          # Databricks Jobs honours the `outcome:` qualifier.
           pipeline_task:
             pipeline_id: ${resources.pipelines.ecom_dlt_pipeline.id}
 
