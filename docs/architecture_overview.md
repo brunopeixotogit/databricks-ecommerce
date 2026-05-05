@@ -158,9 +158,9 @@ them up like any other event source.
 ## 5 · Search hierarchy — and why FAISS
 
 ```
-Tier 1   Databricks Vector Search       ← intended production tier
-Tier 2   FAISS index in a Volume        ← currently serves traffic
-Tier 3   SQL ILIKE on dim_products_scd2 ← last-resort
+Tier 1   Vector Search   (intended production path)
+Tier 2   FAISS           (currently serves traffic — Volume + hot reload)
+Tier 3   SQL ILIKE       (last-resort literal match on dim_products_scd2)
 ```
 
 **The platform constraint.** Free Edition workspaces don't expose
@@ -232,7 +232,43 @@ Search-stack jobs:
 
 ---
 
-## 8 · Storage map
+## 8 · How the system scales
+
+The architecture is designed to **substitute components, not rewrite
+them**. The table below maps every constraint we hit on Free Edition
+to its production replacement, plus the boundary that already exists
+in the codebase to make the swap trivial.
+
+| Component | Current (Free Edition) | Future (production) | What changes in code |
+|---|---|---|---|
+| **Tier 1 retrieval** | FAISS in-process serves; Vector Search (Tier 1) integration is dormant | Vector Search managed endpoint (Tier 1 lights up) | Set `VS_ENDPOINT` + `VS_INDEX_NAME`. `ProductCatalog` already prefers Tier 1 — FAISS becomes a true fallback. |
+| **Tier 2 retrieval** | FAISS index loaded inside the FastAPI process | FAISS retired *or* kept as warm fallback for VS outages | Optional. Both paths share `(product_id, score)` shape — chat code is unchanged. |
+| **Popularity signal** | In-memory polled cache, refreshed by a daemon thread (one SQL query / 15 min) | Shared Delta table (`product_popularity`) refreshed by a scheduled job; backend reads the table | Replace `PopularitySignals.refresh()` with a Delta read; ranker is unchanged. |
+| **API process** | Single `uvicorn` instance | Horizontally scalable service behind a load balancer | Each replica polls the FAISS pointer + popularity Delta independently. No sticky sessions needed — chat is stateless except for `ConversationStore`, which moves to Redis. |
+| **Producer** | Web app + simulator notebook | Web app + Kafka / Kinesis / Event Hubs | Auto Loader points at the streaming source instead of the Volume. Bronze/Silver/Gold unchanged. |
+| **Compute** | Shared cluster + serverless DLT | Per-layer job clusters · Photon · spot · serverless DLT | `databricks.yml` cluster config; pipeline code unchanged. |
+| **Schema governance** | `_rescued_data` rescue column | Confluent / Apicurio Schema Registry on the producer | Bronze schema unchanged; Auto Loader contract is the same. |
+
+### Why the substitution is cheap
+
+* **Three-tier search is interface-driven.** `ProductCatalog` calls
+  Tier 1, Tier 2, Tier 3 through identical method shapes. Adding a
+  Vector Search endpoint flips a tier from "code path waiting for
+  config" to "live tier" without touching the catalog.
+* **Hybrid ranking sits behind a single class.** `HybridRanker.rank()`
+  takes a `Sequence[Product]` and returns the same shape — its source
+  of popularity numbers (cache vs. Delta) is hidden behind one
+  interface (`PopularitySignals.popularity_score(pid)`).
+* **The FAISS rebuild is already a Databricks Job.** Promoting it
+  from "manual + scheduled" to "triggered by upstream DLT update"
+  is one `databricks.yml` change, not a rewrite.
+
+No architectural rewrite required for any of these moves. That's the
+entire point of the layering.
+
+---
+
+## 9 · Storage map
 
 | Path / table | Owner | Purpose |
 |---|---|---|
@@ -249,7 +285,7 @@ Search-stack jobs:
 
 ---
 
-## 9 · Where to read next
+## 10 · Where to read next
 
 | You want to | Read |
 |---|---|

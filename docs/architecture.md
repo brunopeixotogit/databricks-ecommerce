@@ -309,6 +309,22 @@ The chat stack adds one job to [`databricks.yml`](../databricks.yml):
 
 The hybrid-ranker popularity cache is **not** a separate job — it's a daemon thread inside the FastAPI process that runs the aggregation SQL every `POPULARITY_REFRESH_INTERVAL_S` (default 900s). Decision: a new Delta table + scheduled job felt heavier than the problem (one warehouse query per 15 min for the whole catalog). When this stack moves to a multi-instance deploy we'll promote it to a shared Delta table.
 
+### 8.4 Orchestrator safeguards (execution control + safety)
+
+The chat stack reads from `dim_products_scd2`, `events`, and `fact_orders`. Those tables are the orchestrator's responsibility, and the orchestrator (`ecom_orchestrator`) is parameterised by `mode ∈ {prod, simulator, full}`. Two design choices around `mode` are worth calling out separately because they're **execution-control strategy** for the pipeline and a **safety mechanism** for production data.
+
+**Always-run simulator (execution control).** The simulator notebook (`notebooks/11_simulate.py`) is wired into the orchestrator DAG **unconditionally** — it's not gated by a Databricks `condition_task` upstream. Reason: Databricks Jobs ignores the `outcome:` qualifier under `run_if: ALL_DONE` / `NONE_FAILED`; only `ALL_SUCCESS` honours `outcome:`, but `ALL_SUCCESS` blocks any downstream task whose upstream is `EXCLUDED`. Keeping the simulator always-run lets us use `ALL_SUCCESS` end-to-end and still get correct mode semantics across `prod` / `simulator` / `full`. This is execution-control glue around a real platform constraint, not laziness.
+
+**Prod-mode short-circuit (safety).** Because the simulator always runs, the **simulator notebook itself** reads the `mode` widget and exits as a no-op (`dbutils.notebook.exit("skipped: mode=prod")`) when `mode=prod`. This is a deliberate safety mechanism: production runs must **never** generate synthetic events into the landing zone. The check sits at the top of the notebook, before any RNG seed or volume write — there's no code path through which `mode=prod` produces data. The chat stack's downstream tables (and therefore its hybrid ranker's popularity signal) are protected from synthetic contamination by construction.
+
+| Concern | Mechanism | Where it lives |
+|---|---|---|
+| Cannot use `condition_task` to exclude the simulator without breaking DLT downstream | Always-run simulator + `ALL_SUCCESS` chain | `databricks.yml` (orchestrator job) |
+| Production must never produce synthetic events | Notebook short-circuits when `mode=prod` | `notebooks/11_simulate.py` (top of file) |
+| DLT must run in `prod` and `full`, must skip in `simulator` | Single `condition_task` (`gate_dlt`) on `mode != simulator` + default `ALL_SUCCESS` | `databricks.yml` (orchestrator job) |
+
+The result: one `mode` parameter at the top of the bundle controls all three execution shapes, and the safety property *("`prod` never writes synthetic data")* is enforced at the **innermost layer** rather than relying on the outer DAG gating to be configured correctly. If someone removes the gate by accident, `mode=prod` is still safe.
+
 ---
 
 ## 9 · Where to go next

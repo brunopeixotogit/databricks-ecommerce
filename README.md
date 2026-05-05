@@ -12,7 +12,78 @@ A production-style **lakehouse** that simulates an e-commerce site (electronics,
 
 ---
 
-## Why this project
+## Why this project exists
+
+This project simulates a production-grade e-commerce data platform with:
+
+* Multi-agent event generation (users, carts, purchases)
+* Lakehouse pipeline (Bronze → Silver → Gold)
+* Real-time semantic search with hybrid ranking
+
+### What makes it different
+
+* **Tiered semantic search** — Vector Search (Tier 1) → FAISS (Tier 2) → SQL ILIKE (Tier 3)
+* **Hybrid ranking** combining relevance, price, and popularity
+* **Production-grade patterns** — hot reload, atomic pointer swaps, audit columns on every embedding row, model+dim guardrails
+
+This is not a demo pipeline — it's a system designed to behave like a real production environment under platform constraints (Databricks Free Edition).
+
+### Semantic Search Flow
+
+The chat layer never single-points-of-failure on a single retrieval backend. It walks a tiered chain and stops at the first tier that returns hits:
+
+```
+            Query
+              │
+              ▼
+   ┌─────────────────────┐
+   │ Vector Search       │   Tier 1 — intended production path
+   └──────────┬──────────┘   (managed endpoint, sync-from-Delta)
+              │ fallback (unavailable / 0 hits)
+              ▼
+   ┌─────────────────────┐
+   │ FAISS               │   Tier 2 — currently serves traffic
+   └──────────┬──────────┘   (in-process index in a Volume, hot reload)
+              │ fallback (unavailable / 0 hits)
+              ▼
+   ┌─────────────────────┐
+   │ SQL ILIKE           │   Tier 3 — last resort
+   └─────────────────────┘   (literal match on dim_products_scd2)
+```
+
+1. Try **Vector Search (Tier 1)**.
+2. Fallback to **FAISS (Tier 2)**.
+3. Fallback to **SQL ILIKE (Tier 3)**.
+
+This guarantees availability regardless of platform capabilities — the chat reply never errors because the search stack is unhealthy.
+
+### Hybrid ranking impact (simulated)
+
+Re-ranking with `0.60·semantic + 0.15·price + 0.25·popularity` materially changes which products surface at the top:
+
+| Approach        | Relevance | Business alignment |
+| --------------- | --------- | ------------------ |
+| Pure semantic   | High      | Low                |
+| Hybrid ranking  | High      | High               |
+
+Hybrid ranking reduces overpriced and unpopular results in top positions without sacrificing semantic quality. A worked five-product example sits below in §"Chat & semantic search".
+
+### Scaling path
+
+The architecture is designed for **component substitution**, not rewrite:
+
+| Component             | Current (Free Edition)                                  | Future (production)                       |
+| --------------------- | ------------------------------------------------------- | ----------------------------------------- |
+| Active retrieval tier | FAISS (Tier 2) — Vector Search endpoint not provisioned | Vector Search (Tier 1) endpoint serves    |
+| Popularity signal     | In-memory polled cache                                  | Shared Delta table + scheduled job        |
+| API                   | Single `uvicorn` instance                               | Horizontally scalable service             |
+| Producer              | Web app + simulator notebook                            | Web app + Kafka / Kinesis                 |
+
+No architectural rewrite required — the `ProductCatalog` already treats Vector Search and FAISS as interchangeable, and the popularity layer is behind a polled-cache interface that can switch read sources without changing the ranker.
+
+---
+
+## What this project demonstrates
 
 Data-engineering portfolios tend to stop at "I can read a CSV with Spark." This one shows the moving parts of a real lakehouse plus the AI surface that sits on top of it:
 
@@ -216,9 +287,9 @@ user message ──► Router LLM ──► Search tier ──► Hybrid ranker 
 ### Search hierarchy
 
 ```
-Tier 1   Databricks Vector Search       ← intended production tier
-Tier 2   FAISS index in a Volume        ← currently serves traffic
-Tier 3   SQL ILIKE on dim_products_scd2 ← last-resort fallback
+Vector Search (Tier 1)   ← intended production path (managed endpoint)
+FAISS (Tier 2)           ← currently serves traffic (Volume + hot reload)
+SQL ILIKE (Tier 3)       ← last-resort literal match on dim_products_scd2
 ```
 
 **Why FAISS is the live tier.** Free Edition workspaces don't expose

@@ -1,8 +1,19 @@
 # Semantic search
 
 How the BricksShop chat layer turns a free-text query into a list of
-products. Three retrieval tiers, one ranking layer on top, and a clear
-fall-back order between them.
+products.
+
+## Tiered retrieval — TL;DR
+
+The chat layer never single-points-of-failure on a single retrieval
+backend. `ProductCatalog.semantic_search` walks three tiers and stops
+at the first one that returns hits:
+
+| Tier | Backend | Status | Where it lives |
+|---|---|---|---|
+| **Tier 1** | **Vector Search (intended)** | Wired in code; activates when an endpoint is provisioned | `web/backend/vector_search.py`, `pipelines/vector_search/setup.py` |
+| **Tier 2** | **FAISS (current)** | **Currently serves traffic** — hot-reloadable index in a Databricks Volume | `web/backend/faiss_index.py`, `pipelines/faiss/build.py` |
+| **Tier 3** | **SQL ILIKE (fallback)** | Last-resort literal match on `dim_products_scd2` | `web/backend/products.py` (`ProductCatalog.search`) |
 
 ```
 user query
@@ -31,11 +42,15 @@ user query
 ```
 
 Retrieval is unchanged across the tiers — each one returns scored
-candidates ranked by cosine similarity (Tier 1, 2) or a `LIKE` match
-(Tier 3, no score). The hybrid ranker (see [`ranking.md`](./ranking.md))
-re-orders the semantic tiers' output by `0.6·semantic + 0.15·price +
-0.25·popularity`. The SQL fallback is unranked — there's no semantic
-axis to combine with.
+candidates ranked by cosine similarity (Tier 1, Tier 2) or a `LIKE`
+match (Tier 3, no score). The hybrid ranker (see
+[`ranking.md`](./ranking.md)) re-orders the semantic tiers' output by
+`0.60·semantic + 0.15·price + 0.25·popularity`. **Tier 3 is unranked**
+— there's no semantic axis to combine with.
+
+The chain degrades transparently — the catalog logs which tier served
+each query, and the chat layer never sees an error from the search
+stack unless all three tiers fail.
 
 ---
 
