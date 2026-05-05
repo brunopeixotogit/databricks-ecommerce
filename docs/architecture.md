@@ -2,7 +2,9 @@
 
 End-to-end design of the e-commerce lakehouse on **Databricks + Delta Lake**, organised as a Bronze → Silver → Gold medallion. This document explains the system shape, the data flow, and — most importantly — the *reasoning* behind each structural choice.
 
-> Companion docs: [`bronze_layer.md`](./bronze_layer.md), [`silver_layer.md`](./silver_layer.md), [`gold_layer.md`](./gold_layer.md), [`data_model.md`](./data_model.md), [`data_quality.md`](./data_quality.md), [`ci_cd.md`](./ci_cd.md), [`runbook.md`](./runbook.md).
+> **Looking for the one-page system map?** See [`architecture_overview.md`](./architecture_overview.md) — it covers both this lakehouse pipeline and the chat / search / ranking stack on top of it.
+
+> Companion docs: [`bronze_layer.md`](./bronze_layer.md), [`silver_layer.md`](./silver_layer.md), [`gold_layer.md`](./gold_layer.md), [`data_model.md`](./data_model.md), [`data_quality.md`](./data_quality.md), [`ci_cd.md`](./ci_cd.md), [`runbook.md`](./runbook.md), [`search.md`](./search.md), [`ranking.md`](./ranking.md).
 
 ---
 
@@ -246,8 +248,72 @@ CD currently auto-runs **only the DLT pipeline** on push to `main`; the medallio
 
 ---
 
-## 8 · Where to go next
+## 8 · Chat stack on top of the lakehouse
+
+The same FastAPI process that ingests events also hosts a **multi-agent chat assistant**. It is read-only against the catalog (no writes to Silver / Gold tables); the only writes it produces — `add_to_cart` events from the chat widget — flow back through the standard `/events/batch` path so the lakehouse pipeline picks them up like any other event source.
+
+```
+user message
+     │
+     ▼
+┌───────────────┐    intent + clean query + filters
+│ Router LLM    │────────────────────────────────────►
+└───────────────┘                                     │
+                                                      ▼
+                            ┌──────────────────────────────────────┐
+                            │ ProductCatalog.semantic_search       │
+                            │   Tier 1 — Vector Search             │
+                            │   Tier 2 — FAISS index in Volume     │  ◄── currently serves traffic
+                            │   Tier 3 — SQL ILIKE (last resort)   │
+                            └─────────────────┬────────────────────┘
+                                              │ scored candidates
+                                              ▼
+                            ┌──────────────────────────────────────┐
+                            │ HybridRanker                         │
+                            │   final = 0.60·semantic              │
+                            │         + 0.15·price                 │
+                            │         + 0.25·popularity            │
+                            └─────────────────┬────────────────────┘
+                                              ▼
+                                       ┌────────────────┐
+                                       │ Composer LLM   │  natural-language reply
+                                       └────────────────┘
+```
+
+### 8.1 Why FAISS, not Vector Search
+
+Free Edition workspaces do not expose Databricks Vector Search endpoints. We kept the Tier-1 integration in code (`web/backend/vector_search.py`, `pipelines/vector_search/setup.py`) so the moment an endpoint becomes available the chat stack picks it up via env vars (`VS_ENDPOINT`, `VS_INDEX_NAME`) — no code change. In the meantime, **FAISS is the live tier**, built as a production-ready fallback rather than a placeholder:
+
+* embeddings table (`<catalog>.ecom_dlt.product_embeddings`) carries `embedding_model_name` + `embedding_version` per row for full SQL-side auditability,
+* a versioned `faiss_index_v{ts}.idx` lives on a Unity Catalog Volume; a pointer file (`faiss_index_latest.txt`) is written **last** by every rebuild, so partial runs never poison readers,
+* the backend polls the pointer and **hot-reloads** atomically — no FastAPI restart between rebuilds.
+
+Full deep dive: [`search.md`](./search.md).
+
+### 8.2 Why hybrid ranking
+
+Cosine similarity alone surfaces text-matchy products that may be priced badly or unbought. The ranker layers two business signals on top:
+
+* **Price.** Inverse min-max within the candidate pool (cheapest = 1.0, priciest = 0.0). Per-query, so a $5,000-sofa search and a $20-toaster search both get a full-range price contribution.
+* **Popularity.** Polled in-memory cache of `purchases_7d` + `add_to_cart_7d` + `views_7d` per product, log-normalised against the catalog max. Source SQL aggregates `fact_orders` (exploded `items`) and `events` in one roundtrip.
+
+Weights default to `0.60 / 0.15 / 0.25` (semantic / price / popularity), env-overridable. Cold-start safe: when the popularity cache is empty, the ranker emits 0.0 for the popularity component and the score reduces to `w_s·sem + w_p·price` — still strictly more useful than pure semantic. Full deep dive: [`ranking.md`](./ranking.md).
+
+### 8.3 Bundle wiring
+
+The chat stack adds one job to [`databricks.yml`](../databricks.yml):
+
+| Job | What it does | Schedule |
+|---|---|---|
+| `bricksshop_faiss_rebuild` | Re-encodes `dim_products_scd2`, refreshes `product_embeddings`, writes a new `.idx` + pointer | Daily 03:30 UTC, paused by default |
+
+The hybrid-ranker popularity cache is **not** a separate job — it's a daemon thread inside the FastAPI process that runs the aggregation SQL every `POPULARITY_REFRESH_INTERVAL_S` (default 900s). Decision: a new Delta table + scheduled job felt heavier than the problem (one warehouse query per 15 min for the whole catalog). When this stack moves to a multi-instance deploy we'll promote it to a shared Delta table.
+
+---
+
+## 9 · Where to go next
 
 - Reading **for runtime behaviour** → [`bronze_layer.md`](./bronze_layer.md), [`silver_layer.md`](./silver_layer.md), [`gold_layer.md`](./gold_layer.md)
 - Reading **for the data shape** → [`data_model.md`](./data_model.md)
 - Reading **for operability** → [`runbook.md`](./runbook.md), [`ci_cd.md`](./ci_cd.md), [`data_quality.md`](./data_quality.md)
+- Reading **for the chat stack** → [`architecture_overview.md`](./architecture_overview.md), [`search.md`](./search.md), [`ranking.md`](./ranking.md)

@@ -14,10 +14,12 @@ A production-style **lakehouse** that simulates an e-commerce site (electronics,
 
 ## Why this project
 
-Data-engineering portfolios tend to stop at "I can read a CSV with Spark." This one shows the moving parts of a real lakehouse:
+Data-engineering portfolios tend to stop at "I can read a CSV with Spark." This one shows the moving parts of a real lakehouse plus the AI surface that sits on top of it:
 
 - **Decoupled producers** — a web application that emits real user events and a notebook simulator that emits synthetic test data; both write to the same landing zone with the same schema, distinguished only by a `properties.source` tag.
 - **Two interchangeable processing paths** — a notebook-based Workflow job (`medallion`) and a declarative Delta Live Tables pipeline (`ecom_dlt_pipeline`). Same logic, different ergonomic profiles.
+- **Multi-agent chat with tiered semantic search** — Databricks Model Serving for routing + reply composition; a three-tier search chain (Vector Search → FAISS → SQL) with **FAISS as the production-ready fallback** (Free Edition workspaces don't expose Vector Search endpoints).
+- **Hybrid ranking layer** — semantic similarity is necessary but not sufficient. A re-ranker combines `0.60·semantic + 0.15·price + 0.25·popularity` (popularity from `fact_orders` + `events` over a rolling 7-day window) so chat results match what shoppers actually want, not just what looks similar in vector space.
 - **Mode-controlled orchestration** — a single bundle job (`ecom_orchestrator`) runs simulator-only, processing-only (default), or both end-to-end based on a `mode` parameter. Production runs never generate synthetic data.
 - **Pinned schemas, idempotent transforms, attribute-hash SCD2, query-tuned Gold marts, runtime quality gates** — the textbook patterns implemented end-to-end and validated against a live workspace.
 
@@ -74,6 +76,16 @@ Two independent producers, one landing zone, two interchangeable processing path
 | Gold  | Denormalised marts optimised for query speed     | Full `overwrite` (`overwriteSchema=true`) |
 
 The **simulator is fully decoupled** from the processing layer. The DLT pipeline (`pipelines/dlt/`) reads from the landing volume and never invokes the simulator. The simulator is a separate notebook (`notebooks/11_simulate.py`) that you trigger explicitly.
+
+**A chat stack sits on top.** The same FastAPI process exposes
+`/chat` and `/chat/add-to-cart` endpoints backed by Databricks Model
+Serving (router + composer LLMs), a three-tier semantic search chain
+(Vector Search → FAISS → SQL), and a hybrid ranker that combines
+semantic similarity with price + 7-day popularity. Add-to-cart events
+from chat re-enter the lakehouse through the same landing zone the
+storefront uses — no separate write path. See
+[`docs/architecture_overview.md`](./docs/architecture_overview.md)
+for the full system map.
 
 ---
 
@@ -188,6 +200,104 @@ Full operational guide in [`web/README.md`](./web/README.md).
 
 ---
 
+## Chat & semantic search
+
+The web app ships with a **multi-agent chat assistant** that turns
+free-text queries ("a quiet desk fan under $80") into ranked product
+results. The implementation is end-to-end production-ready:
+
+```
+user message ──► Router LLM ──► Search tier ──► Hybrid ranker ──► Composer LLM ──► reply
+                  (Databricks   (VS → FAISS      (semantic +       (Databricks
+                   Model         → SQL)           price +           Model
+                   Serving)                       popularity)       Serving)
+```
+
+### Search hierarchy
+
+```
+Tier 1   Databricks Vector Search       ← intended production tier
+Tier 2   FAISS index in a Volume        ← currently serves traffic
+Tier 3   SQL ILIKE on dim_products_scd2 ← last-resort fallback
+```
+
+**Why FAISS is the live tier.** Free Edition workspaces don't expose
+Vector Search endpoints. We kept the Tier-1 integration in code (it
+lights up the moment an endpoint becomes available) and built FAISS as
+a self-contained, production-grade fallback:
+
+- A sentence-transformer (`all-MiniLM-L6-v2`, dim 384) runs inside the
+  FastAPI process; the FAISS `IndexFlatIP` lives on a Unity Catalog
+  Volume (`/Volumes/dev_main/ecom_artifacts/faiss/`).
+- A pointer file (`faiss_index_latest.txt`) is rewritten **last** by
+  every rebuild — partial runs never poison the latest pointer.
+- The backend polls the pointer and **hot-reloads** the index without
+  a restart; the swap is atomic for in-flight queries.
+- The embeddings Delta table carries `embedding_model_name` +
+  `embedding_version` per row; mismatches between the index and the
+  loaded model are detected at load time and the tier refuses to serve.
+
+Deep dive: [`docs/search.md`](./docs/search.md).
+
+### Hybrid ranking — why semantic similarity isn't enough
+
+```
+final_score = 0.60 · semantic_similarity     (cosine, FAISS / VS)
+            + 0.15 · price_score             (per-query inverse min-max)
+            + 0.25 · popularity_score        (log-norm, 7-day events + orders)
+```
+
+All three components live in `[0, 1]`; weights are env-tunable
+(`SEMANTIC_WEIGHT` / `PRICE_WEIGHT` / `POPULARITY_WEIGHT`). The
+popularity signal is a polled in-memory cache fed by a single
+aggregate query against `fact_orders` + `events` — chat replies
+never block on this SQL.
+
+### Before vs. after — five candidates, query *"sturdy gaming desk"*
+
+```
+Before — pure semantic                After — hybrid ranking
+1. Premium widget       sem=0.92      1. Popular workhorse  final=0.841  sem=0.79  pop=0.95
+2. Mid widget           sem=0.88      2. Budget widget      final=0.736  sem=0.81  pop=0.40
+3. Niche widget         sem=0.86      3. Mid widget         final=0.648
+4. Budget widget        sem=0.81      4. Niche widget       final=0.606
+5. Popular workhorse    sem=0.79      5. Premium widget     final=0.565  sem=0.92  pop=0.05
+```
+
+The expensive, unbought "Premium widget" drops from rank 1 to rank 5;
+the cheap, popular workhorse rises from rank 5 to rank 1. The ranker
+replaces *"closest text match"* with *"closest text match the shopper
+is most likely to actually want."* Deep dive:
+[`docs/ranking.md`](./docs/ranking.md).
+
+### Quick start — chat
+
+```bash
+# 1. Provision the FAISS Volume (once)
+python -m pipelines.faiss.setup_volume
+
+# 2. Build the embeddings Delta table + FAISS index
+python -m pipelines.faiss.build --progress
+
+# 3. Run the backend (chat stack starts automatically)
+uvicorn web.backend.app:app --reload --env-file web/config/.env
+
+# 4. Open http://localhost:8000 → chat widget bottom-right.
+```
+
+To roll a new index from Databricks instead, deploy + run the bundle
+job:
+
+```bash
+databricks bundle deploy --target dev
+databricks bundle run    --target dev bricksshop_faiss_rebuild
+```
+
+The backend hot-reloads from the pointer within
+`FAISS_POLL_INTERVAL_S` seconds (default 60). No restart needed.
+
+---
+
 ## Data model
 
 | Layer | Table | Grain | What lives here |
@@ -255,7 +365,10 @@ Concise documentation in [`docs/`](./docs/README.md):
 
 | Doc | Read this for |
 |---|---|
-| [`docs/architecture.md`](./docs/architecture.md)     | End-to-end design, data flow, principles, tradeoffs |
+| [`docs/architecture_overview.md`](./docs/architecture_overview.md) | One-page system map: pipeline + chat stack on a single canvas |
+| [`docs/architecture.md`](./docs/architecture.md)     | Lakehouse design, data flow, principles, tradeoffs (data side) |
+| [`docs/search.md`](./docs/search.md)                 | Three-tier semantic search; FAISS as platform-constrained fallback |
+| [`docs/ranking.md`](./docs/ranking.md)               | Hybrid ranking: semantic + price + popularity, with worked example |
 | [`docs/dlt_pipeline.md`](./docs/dlt_pipeline.md)     | DLT pipeline: code structure, execution model, deployment |
 | [`docs/bronze_layer.md`](./docs/bronze_layer.md)     | Auto Loader, schema enforcement, append-only contract |
 | [`docs/silver_layer.md`](./docs/silver_layer.md)     | Dedup, sessionisation, SCD2 by attribute hash |
@@ -292,17 +405,37 @@ The architectural shape — medallion, event-first, decoupled producers — stay
 
 ## 🇧🇷 Português (BR)
 
-**BricksShop** é uma plataforma estilo lakehouse que simula um e-commerce, captura eventos de comportamento de **dois produtores independentes** (uma aplicação web real e um simulador sintético em notebook), e refina os dados em uma medallion **Bronze → Silver → Gold** sobre **Delta Lake** — terminando em quatro marts prontos para análise: vendas diárias, funil de conversão, carrinhos abandonados e user 360.
+**BricksShop** é uma plataforma estilo lakehouse que simula um e-commerce, captura eventos de comportamento de **dois produtores independentes** (uma aplicação web real e um simulador sintético em notebook), e refina os dados em uma medallion **Bronze → Silver → Gold** sobre **Delta Lake** — terminando em quatro marts prontos para análise: vendas diárias, funil de conversão, carrinhos abandonados e user 360. Sobre essa base há um **chat multi-agente** com busca semântica em três camadas e um **ranker híbrido** (semântico + preço + popularidade).
 
 ### Arquitetura em uma frase
 
 ```
 Web app  ─┐
           ├─►  Volume de landing  ─►  Bronze  ─►  Silver  ─►  Gold
-Simulador─┘
+Simulador─┘                                              ▲
+                                                         │  leitura
+                                       Chat (Router LLM ─► VS / FAISS / SQL ─► Ranker ─► Composer LLM)
 ```
 
-Os dois produtores escrevem **NDJSON** no mesmo Volume Unity Catalog (`/Volumes/<catalog>/ecom_bronze/landing/events/dt=YYYY-MM-DD/`) com o **mesmo schema**. O único diferenciador é `properties.source = "web" | "simulator"`. O DLT pipeline é totalmente independente: lê o Volume e nunca dispara o simulador.
+Os dois produtores escrevem **NDJSON** no mesmo Volume Unity Catalog (`/Volumes/<catalog>/ecom_bronze/landing/events/dt=YYYY-MM-DD/`) com o **mesmo schema**. O único diferenciador é `properties.source = "web" | "simulator"`. O DLT pipeline é totalmente independente: lê o Volume e nunca dispara o simulador. O chat lê de `dim_products_scd2` / `events` / `fact_orders` e devolve eventos `add_to_cart` ao mesmo landing zone — não existe caminho de escrita separado.
+
+### Busca semântica e ranking
+
+| Camada | O que é | Status |
+|---|---|---|
+| 1. **Databricks Vector Search** | Endpoint gerenciado, sync direto do Delta | Indisponível em Free Edition — código pronto |
+| 2. **FAISS em Volume** | Sentence-transformer no FastAPI + `IndexFlatIP` em `/Volumes/.../faiss/` com hot-reload via pointer | **Camada que serve hoje** |
+| 3. **SQL `ILIKE`** | Última instância sobre `dim_products_scd2` | Tier 3 |
+
+O ranker híbrido reordena os candidatos retornados pela busca:
+
+```
+final_score = 0.60·similaridade_semântica + 0.15·score_de_preço + 0.25·popularidade
+```
+
+Popularidade vem de `fact_orders` + `events` em janela móvel de 7 dias, atualizada em background. Pesos são configuráveis via env (`SEMANTIC_WEIGHT` / `PRICE_WEIGHT` / `POPULARITY_WEIGHT`). Detalhes:
+[`docs_ptbr/15_busca_semantica.md`](./docs_ptbr/15_busca_semantica.md) e
+[`docs_ptbr/16_ranking_hibrido.md`](./docs_ptbr/16_ranking_hibrido.md).
 
 ### Modos de execução
 

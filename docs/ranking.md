@@ -5,6 +5,9 @@ reply, re-scoring the candidate products to balance relevance, price,
 and recent popularity. Retrieval is unchanged; this layer only
 re-orders what the retrieval already produced.
 
+> Companion: [`search.md`](./search.md) — the retrieval tiers (Vector
+> Search → FAISS → SQL) that feed this ranker.
+
 ```
 Vector Search / FAISS  ──►  HybridRanker  ──►  /chat reply
    (top-K candidates)        (re-scored,         (top-N shown to user)
