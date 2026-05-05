@@ -154,6 +154,27 @@ resources:
       email_notifications:
         on_failure: []   # populate with on-call alias when promoted
 
+    # ---------------------------------------------------------------------
+    # FAISS index rebuild job — refreshes embeddings + index in the Volume.
+    # The backend hot-reloads from the pointer file, so this job is the
+    # canonical way to roll a new index without restarting the FastAPI
+    # service. Idempotent and safe to re-run by hand.
+    # ---------------------------------------------------------------------
+    bricksshop_faiss_rebuild:
+      name: bricksshop-faiss-rebuild
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: rebuild_index
+          notebook_task:
+            notebook_path: notebooks/faiss_rebuild.py
+      schedule:
+        # Daily at 03:30 UTC; flip pause_status when ready to roll.
+        quartz_cron_expression: "0 30 3 * * ?"
+        timezone_id: UTC
+        pause_status: PAUSED
+      email_notifications:
+        on_failure: []
+
 targets:
   dev:
     mode: development

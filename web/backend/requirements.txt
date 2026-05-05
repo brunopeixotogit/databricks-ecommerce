@@ -3,3 +3,11 @@ uvicorn[standard]>=0.27,<1.0
 pydantic>=2.6,<3.0
 httpx>=0.27,<1.0
 python-dotenv>=1.0,<2.0
+databricks-sdk>=0.30,<1.0
+databricks-vectorsearch>=0.40,<1.0
+# FAISS fallback tier — local sentence-transformer + on-disk FAISS index
+# pulled from a Databricks Volume. faiss-cpu pulls in a small CPU-only
+# native shared library; sentence-transformers brings torch transitively.
+sentence-transformers>=2.7,<5.0
+faiss-cpu>=1.7,<2.0
+numpy>=1.24,<3.0
